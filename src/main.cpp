@@ -581,7 +581,7 @@ void handleRoot() {
   String page;
   page.reserve(7600);
   page += pageStart("ChronoWinder");
-  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Settings</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header><p class=\"status\">");
+  page += F("<header class=\"top\"><div><a class=\"eyebrow\" href=\"/\">ChronoWinder</a><h1>Settings</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header><p class=\"status\">");
   if (WiFi.status() == WL_CONNECTED) {
     page += "Connected to ";
     page += htmlEscape(WiFi.SSID());
@@ -706,7 +706,7 @@ void handleStatus() {
   String page;
   page.reserve(2800);
   page += pageStart("Winder Status");
-  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Status</h1></div><nav><a href=\"/\">Settings</a><a class=\"active\" href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header><section class=\"panel\"><h2>Current State</h2><div class=\"metrics\">");
+  page += F("<header class=\"top\"><div><a class=\"eyebrow\" href=\"/\">ChronoWinder</a><h1>Status</h1></div><nav><a href=\"/\">Settings</a><a class=\"active\" href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header><section class=\"panel\"><h2>Current State</h2><div class=\"metrics\">");
   page += statusTile("State", operationStateName(opState));
   page += statusTile("Phase", phaseName());
   page += statusTile("Burst turn", burstProgressText());
@@ -773,7 +773,7 @@ void handleSave() {
   persistDailyTurnCounter();
   bool centered = centerAndStopForMaintenance("settings saved");
   String page = pageStart("Settings saved");
-  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Restarting</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header>");
+  page += F("<header class=\"top\"><div><a class=\"eyebrow\" href=\"/\">ChronoWinder</a><h1>Restarting</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header>");
   page += F("<section class=\"panel\"><h2>Settings saved</h2><div class=\"checklist\"><div><span class=\"badge ok\">OK</span>Settings saved</div><div><span class=\"badge ");
   page += centered ? F("ok\">OK") : F("notok\">NOT OK");
   page += F("</span>Center watch before restart</div><div><span class=\"badge ok\">OK</span>Restart queued</div></div><p class=\"status\">The device is restarting. The Settings page will reload automatically in a few seconds.</p></section>");
@@ -841,7 +841,7 @@ void handleProfile() {
 void handleRestart() {
   Serial.println("Restart requested from web page.");
   String page = pageStart("Restarting");
-  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Restarting</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header>");
+  page += F("<header class=\"top\"><div><a class=\"eyebrow\" href=\"/\">ChronoWinder</a><h1>Restarting</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header>");
   page += F("<section class=\"panel\"><h2>Restart queued</h2><p class=\"status\">The device is restarting. The Settings page will reload automatically in a few seconds.</p></section>");
   page += F("<script>setTimeout(()=>{location.href='/'},8000);</script>");
   page += pageEnd();
@@ -855,7 +855,7 @@ void handleUpdatePage() {
   String page;
   page.reserve(2600);
   page += pageStart("Firmware Update");
-  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Firmware</h1></div><nav><a href=\"/\">Settings</a><a href=\"/status\">Status</a><a class=\"active\" href=\"/update\">Firmware</a></nav></header>");
+  page += F("<header class=\"top\"><div><a class=\"eyebrow\" href=\"/\">ChronoWinder</a><h1>Firmware</h1></div><nav><a href=\"/\">Settings</a><a href=\"/status\">Status</a><a class=\"active\" href=\"/update\">Firmware</a></nav></header>");
   page += F("<section class=\"panel\"><h2>Upload Firmware</h2><div class=\"hint\"><span>Expected file</span><code>.pio/build/esp32-c3-devkitm-1/firmware.bin</code></div>");
   page += F("<form id=\"updateForm\" method=\"post\" action=\"/update\" enctype=\"multipart/form-data\">");
   page += F("<label class=\"uploadBox\"><span>Choose firmware .bin</span><small id=\"fileName\">No file selected</small><input type=\"file\" name=\"firmware\" accept=\".bin\"></label>");
@@ -886,7 +886,7 @@ void handlePrepareUpdate() {
 void handleUpdateFinished() {
   bool updateOk = !firmwareUploadRejected && !Update.hasError();
   String page = pageStart(updateOk ? "Firmware updated" : "Update failed");
-  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Firmware</h1></div><nav><a href=\"/\">Settings</a><a href=\"/status\">Status</a><a class=\"active\" href=\"/update\">Firmware</a></nav></header>");
+  page += F("<header class=\"top\"><div><a class=\"eyebrow\" href=\"/\">ChronoWinder</a><h1>Firmware</h1></div><nav><a href=\"/\">Settings</a><a href=\"/status\">Status</a><a class=\"active\" href=\"/update\">Firmware</a></nav></header>");
   if (updateOk) {
     page += F("<section class=\"panel\"><h2>Firmware updated</h2><div class=\"checklist\"><div><span class=\"badge ok\">OK</span>ESP32 image validation passed</div><div><span class=\"badge ok\">OK</span>Restart queued</div></div><p class=\"status\">The device is restarting. The Settings page will reload automatically in a few seconds.</p></section>");
     page += F("<script>setTimeout(()=>{location.href='/'},8000);</script>");
@@ -974,18 +974,19 @@ String pageStart(const String &title) {
   page += F("<title>");
   page += htmlEscape(title);
   page += F("</title><style>");
-  page += F("html{min-height:100%;background:#070b0f}");
-  page += F("body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;min-height:100%;color:#dce7ee;background:radial-gradient(circle at 20% 0%,rgba(57,200,183,.14),transparent 34%),linear-gradient(180deg,#0b1117,#070b0f)}");
-  page += F("*{box-sizing:border-box}.page{position:relative;max-width:680px;margin:0;padding:24px 18px 40px}h1{margin:0;font-size:24px;letter-spacing:0;color:#dce7ee}h2{margin:0 0 14px;font-size:17px;color:#f4f8fb}.eyebrow{margin:0 0 3px;color:#f4f8fb;font-size:28px;font-weight:850}");
-  page += F(".top{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:18px}nav{display:flex;gap:8px;flex-wrap:wrap}nav a{padding:8px 10px;border:1px solid #263541;background:#101820;color:#adc1cc;text-decoration:none;font-size:14px}nav a.active,nav a:hover{border-color:#39c8b7;color:#effffb;background:#13302f}");
-  page += F(".panel,.status{background:rgba(16,24,32,.9);border:1px solid #263541;box-shadow:0 14px 38px rgba(0,0,0,.28)}.panel{padding:16px;margin-top:16px}.status{padding:12px;color:#b9c8d2}p{line-height:1.45}label{display:block;margin-top:14px;color:#dce7ee;font-weight:700;font-size:14px}");
-  page += F(".metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{padding:14px;background:#0d151c;border:1px solid #263541}.metric span{display:block;color:#7f95a3;font-size:12px;font-weight:800;text-transform:uppercase}.metric strong{display:block;margin-top:6px;color:#f4f8fb;font-size:20px}.next{margin-bottom:0}");
-  page += F("input,select{width:100%;padding:11px 12px;margin-top:6px;font-size:16px;color:#eef7fb;background:#0c1218;border:1px solid #31414e;outline:none}input:focus,select:focus{border-color:#39c8b7;box-shadow:0 0 0 2px rgba(57,200,183,.16)}input[type=checkbox]{width:auto;margin-right:8px;accent-color:#39c8b7}");
-  page += F("button{border:1px solid #2d4350;background:#152331;color:#e7f4f8;padding:11px 14px;font-size:15px;font-weight:800;cursor:pointer}button:hover{border-color:#39c8b7;background:#173335}.primary{width:100%;margin-top:18px;background:#1b766f;border-color:#39c8b7;color:white}");
-  page += F(".resourceLink{display:block;margin-top:12px;padding:11px 12px;background:#102028;border:1px solid #2b5360;color:#63d6c6;text-decoration:none;font-weight:800}.resourceLink:hover{background:#13302f;border-color:#39c8b7;color:#effffb}");
-  page += F(".window{padding:12px;margin-top:12px;background:#0d151c;border:1px solid #263541}.window label{font-weight:600}.inline{display:flex;gap:12px}.inline label{flex:1}.check{display:flex;align-items:center}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions form,.profile{margin:0}.actions button,.profile button{width:100%;margin-top:0}");
-  page += F(".profile{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:end;margin-top:12px;padding:10px;background:#0d151c;border:1px solid #263541}.profile label{margin-top:0}code{color:#63d6c6}.percent{font-weight:800;margin-top:8px;color:#63d6c6}progress{width:100%;height:24px;margin-top:18px;accent-color:#39c8b7}");
-  page += F(".hint{display:grid;gap:5px;padding:12px;background:#0d151c;border:1px solid #263541}.hint span,.uploadBox small{color:#7f95a3;font-size:12px;font-weight:800;text-transform:uppercase}.uploadBox{display:block;padding:18px;margin-top:14px;text-align:center;background:#0d151c;border:1px dashed #3a5261}.uploadBox span{display:block;color:#f4f8fb;font-size:18px}.uploadBox input{margin-top:12px}.progressBox{margin-top:16px}.stage{margin:10px 0 0;color:#f4f8fb;font-size:18px;font-weight:850}.message{margin:4px 0 0;color:#b9c8d2}.checklist{display:grid;gap:8px}.checklist div{padding:10px;background:#0d151c;border:1px solid #263541;color:#dce7ee}.badge{display:inline-block;margin-right:8px;padding:2px 7px;font-size:11px;font-weight:900}.badge.ok{background:#12382f;color:#63d6c6;border:1px solid #236a5a}.badge.notok{background:#3d1719;color:#ff8585;border:1px solid #8a2f35}.badge.pending{background:#242f39;color:#a9bac5;border:1px solid #3b4a57}button:disabled{opacity:.45;cursor:not-allowed}");
+  page += F("html{min-height:100%;background:#000}");
+  page += F("body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;min-height:100%;color:#f5f5f7;background:linear-gradient(180deg,#161617 0%,#050505 55%,#000 100%)}");
+  page += F("*{box-sizing:border-box}.page{position:relative;max-width:760px;margin:0 auto;padding:30px 18px 48px}h1,h2,.eyebrow{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;letter-spacing:0;color:#f5f5f7;text-transform:uppercase}h1{position:relative;flex:0 0 100%;order:3;margin:0;padding-top:22px;font-size:28px;line-height:1.08;font-weight:850}h1:before{content:\"\";position:absolute;left:0;right:0;top:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.18),transparent)}h2{margin:0 0 16px;font-size:20px;line-height:1.12;font-weight:850}.eyebrow{display:inline-block;order:1;margin:0;padding:6px 12px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgba(255,255,255,.08);box-shadow:0 8px 24px rgba(0,0,0,.24);font-size:32px;line-height:1;font-weight:900;text-decoration:none;backdrop-filter:blur(18px)}.eyebrow:hover,.eyebrow:focus{border-color:#2997ff;background:rgba(0,113,227,.18);outline:none}");
+  page += F(".top{display:flex;flex-wrap:wrap;justify-content:space-between;gap:18px;align-items:flex-start;margin:8px 0 22px}.top>div{display:contents}nav{display:flex;order:2;gap:8px;flex-wrap:wrap;padding:5px;background:rgba(36,36,38,.72);border:1px solid rgba(255,255,255,.12);border-radius:999px;box-shadow:0 12px 32px rgba(0,0,0,.34);backdrop-filter:blur(18px)}nav a{padding:8px 13px;border-radius:999px;color:#d2d2d7;text-decoration:none;font-size:14px;font-weight:700}nav a.active,nav a:hover{color:#fff;background:#0071e3}");
+  page += F(".panel,.status{background:rgba(28,28,30,.78);border:1px solid rgba(255,255,255,.12);border-radius:8px;box-shadow:0 18px 42px rgba(0,0,0,.42);backdrop-filter:blur(20px)}.panel{padding:22px;margin-top:18px}.status{padding:13px 15px;color:#a1a1a6}p{line-height:1.48}label{display:block;margin-top:15px;color:#f5f5f7;font-weight:700;font-size:14px}");
+  page += F(".metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{padding:15px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.metric span{display:block;color:#a1a1a6;font-size:12px;font-weight:800;text-transform:uppercase}.metric strong{display:block;margin-top:6px;color:#f5f5f7;font-size:22px;letter-spacing:0}.next{margin-bottom:0}");
+  page += F("input,select{width:100%;padding:12px 13px;margin-top:7px;font-size:16px;color:#f5f5f7;background:rgba(44,44,46,.9);border:1px solid rgba(255,255,255,.16);border-radius:8px;outline:none}input:focus,select:focus{border-color:#2997ff;box-shadow:0 0 0 4px rgba(41,151,255,.18)}input[type=checkbox]{width:auto;margin-right:9px;accent-color:#0071e3}");
+  page += F("button{border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgba(44,44,46,.9);color:#f5f5f7;padding:11px 15px;font-size:15px;font-weight:800;cursor:pointer;box-shadow:0 8px 20px rgba(0,0,0,.28)}button:hover{border-color:#2997ff;color:#2997ff}.primary{width:100%;margin-top:20px;background:#0071e3;border-color:#0071e3;color:white}.primary:hover{background:#0077ed;color:white}");
+  page += F(".resourceLink{display:block;margin-top:12px;padding:12px 13px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px;color:#2997ff;text-decoration:none;font-weight:800}.resourceLink:hover{background:rgba(0,113,227,.16);border-color:#2997ff}");
+  page += F(".window{padding:12px;margin-top:12px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.window label{font-weight:600}.inline{display:flex;gap:12px}.inline label{flex:1}.check{display:flex;align-items:center}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.actions form,.profile{margin:0}.actions button,.profile button{width:100%;margin-top:0}");
+  page += F(".profile{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:end;margin-top:12px;padding:10px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.profile label{margin-top:0}code{color:#2997ff}.percent{font-weight:800;margin-top:8px;color:#2997ff}progress{width:100%;height:24px;margin-top:18px;accent-color:#0071e3}");
+  page += F(".hint{display:grid;gap:5px;padding:13px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.hint span,.uploadBox small{color:#a1a1a6;font-size:12px;font-weight:800;text-transform:uppercase}.uploadBox{position:relative;display:block;padding:28px 20px;margin-top:14px;text-align:center;background:rgba(44,44,46,.82);border:1px dashed rgba(255,255,255,.24);border-radius:8px;cursor:pointer}.uploadBox:hover,.uploadBox:focus-within{border-color:#2997ff;background:rgba(0,113,227,.12)}.uploadBox span{display:block;color:#f5f5f7;font-size:18px;font-weight:800}.uploadBox input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}.progressBox{margin-top:16px}.stage{margin:10px 0 0;color:#f5f5f7;font-size:18px;font-weight:850}.message{margin:4px 0 0;color:#a1a1a6}.checklist{display:grid;gap:8px}.checklist div{padding:11px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px;color:#f5f5f7}.badge{display:inline-block;margin-right:8px;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.ok{background:rgba(48,209,88,.16);color:#30d158;border:1px solid rgba(48,209,88,.42)}.badge.notok{background:rgba(255,69,58,.16);color:#ff453a;border:1px solid rgba(255,69,58,.42)}.badge.pending{background:rgba(142,142,147,.18);color:#d2d2d7;border:1px solid rgba(142,142,147,.36)}button:disabled{opacity:.45;cursor:not-allowed}");
+  page += F("@media(max-width:620px){.page{padding:22px 14px 36px}h1{font-size:25px}.eyebrow{font-size:28px}nav{justify-content:center}.metrics,.actions{grid-template-columns:1fr}.panel{padding:18px}}");
   page += F("</style></head><body><main class=\"page\">");
   return page;
 }
