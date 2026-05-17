@@ -1,0 +1,1501 @@
+#include <Arduino.h>
+#include <AccelStepper.h>
+#include <Preferences.h>
+#include <Update.h>
+#include <WebServer.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <time.h>
+
+#define BUTTON_PIN 3
+#define LONGPRESS_MS 1000
+#define STARTUP_LOG_WINDOW_MS 10000
+#define STARTUP_LOG_INTERVAL_MS 1000
+#define TOUCH_DEBOUNCE_MS 50
+#define CALIBRATION_REVERSE_WINDOW_MS 2500
+#define CALIBRATION_SPEED_STEPS_PER_SEC 120
+#define WIFI_CONNECT_TIMEOUT_MS 10000
+#define NTP_SYNC_TIMEOUT_MS 5000
+#define WATCH_PROFILES 3
+#define LOCAL_TIME_ZONE "MST7MDT,M3.2.0,M11.1.0"
+#define MIN_FIRMWARE_SIZE_BYTES 100000
+#define DEFERRED_RESTART_DELAY_MS 2500
+#define CENTER_RETURN_RPM 20
+#define MDNS_HOSTNAME "chrono-winder"
+
+void processTouch();
+void processOperating();
+void processDeferredRestart();
+bool isTouchPressed(int pin);
+void logButtonEdge(bool isPressed);
+void logStartupHeartbeat();
+void updateDebouncedTouch();
+void processAutoDailyWinding();
+void loadConfig();
+void saveConfig();
+void parseConfigFromRequest();
+void setupWiFi();
+void setupTime();
+void setupWebServer();
+void setupMdns();
+void handleRoot();
+void handleStatus();
+void handleSave();
+void handleAction();
+void handleProfile();
+void handleRestart();
+void handleUpdatePage();
+void handlePrepareUpdate();
+void handleUpdateFinished();
+void handleFirmwareUpload();
+String pageStart(const String &title);
+String pageEnd();
+String htmlEscape(const String &value);
+String jsStringEscape(const String &value);
+void updateDailyTurnCounter();
+int currentDateKey();
+uint16_t remainingTurnsToday();
+void recordCompletedTurns(uint16_t turns);
+void persistDailyTurnCounter();
+uint16_t turnsForNextBurst();
+bool shouldUseDailyTurnLimit();
+bool dailyTurnLimitReached();
+void startConfiguredBurst(uint16_t turns);
+long directionalCenterPosition();
+long nearestCenterPosition();
+void moveToNearestCenter(const char *reason);
+float rpmToStepsPerSecond(uint16_t rpm);
+void applyMotorMotion(float maxStepsPerSecond);
+const char *directionName();
+const char *phaseName();
+String actionButton(const String &command, const String &label);
+String statusText();
+String nextActionText();
+String statusTile(const String &label, const String &value);
+String burstProgressText();
+void stopWinderNow(const char *reason);
+void requestRestart(const char *reason, unsigned long delayMs = DEFERRED_RESTART_DELAY_MS);
+bool centerAndStopForMaintenance(const char *reason);
+void centerAndStopForFirmwareUpdate(const char *reason);
+void resetDailyCounter();
+void loadProfile(uint8_t index);
+void saveProfile(uint8_t index);
+String profileName(uint8_t index);
+
+const int TOTAL_RUN_TIMES_STEPPER = 3;
+const byte Fullstep = 4;
+const byte Halfstep = 8;
+const short fullResolution = 2038;
+const float StepDegreeHalf = 11.32;
+const float StepDegreeFull = 5.82;
+bool firstMove = true;
+int runTimes = 0;
+const float StepsPerOutputRotation = 360.0 * StepDegreeHalf;
+const uint16_t DefaultStepsPerOutputRotation = lround(StepsPerOutputRotation);
+
+long long touchStart = 0;
+unsigned long startupLogUntil = 0;
+unsigned long lastStartupLog = 0;
+bool rawTouchPressed = false;
+bool lastRawTouchPressed = false;
+unsigned long rawTouchChangedAt = 0;
+unsigned long lastCalibrationEndedAt = 0;
+bool firmwareUploadRejected = false;
+String firmwareUpdateError = "";
+bool firmwareUpdateInProgress = false;
+bool restartPending = false;
+unsigned long restartAt = 0;
+int calibrationDirection = 1;
+int lastCalibrationDirection = 1;
+uint8_t selectedProfileSlot = 0;
+bool nextBothBurstCcw = false;
+
+enum OperationState {
+  STANDBY = 0,
+  CALIBRATION_ENTRY = 1,
+  CALIBRATION = 2,
+  CALIBRATION_STOP = 3,
+  OPERATION_START = 4,
+  OPERATION = 5,
+  OPERATION_STOP = 6
+};
+
+enum MotorPhase {
+  MOTOR_IDLE = 0,
+  MOTOR_CW = 1,
+  MOTOR_CCW = 2,
+  MOTOR_REST = 3
+};
+
+enum RotationDirection {
+  DIRECTION_CW = 0,
+  DIRECTION_CCW = 1,
+  DIRECTION_BOTH = 2
+};
+
+enum TouchState {
+  TOUCH_STANDBY = 0,
+  TOUCH_START = 1,
+  TOUCH = 2,
+  TOUCH_STOP = 3
+};
+
+enum TouchType {
+  NONE = 0,
+  SIMPLE = 1,
+  LONG = 2
+};
+
+const char *operationStateName(OperationState state);
+const char *touchStateName(TouchState state);
+const char *touchTypeName(TouchType type);
+void setOperationState(OperationState nextState, const char *reason);
+void setTouchState(TouchState nextState);
+void setTouchType(TouchType nextType, const char *reason);
+
+struct AppConfig {
+  String wifiSsid;
+  String wifiPassword;
+  RotationDirection direction = DIRECTION_CW;
+  uint16_t turnsPerDay = 650;
+  uint16_t activeRpm = 6;
+  uint16_t turnsPerBurst = 10;
+  uint16_t restMinutes = 5;
+  uint16_t stepsPerRotation = DefaultStepsPerOutputRotation;
+  uint16_t calibrationSpeed = CALIBRATION_SPEED_STEPS_PER_SEC;
+  bool disableMotorDuringRest = true;
+  bool manualRunUsesDailyLimit = true;
+  bool autoDailyWinding = false;
+};
+
+struct WatchProfile {
+  String name;
+  RotationDirection direction = DIRECTION_CW;
+  uint16_t turnsPerDay = 650;
+  uint16_t activeRpm = 6;
+  uint16_t turnsPerBurst = 10;
+  uint16_t restMinutes = 5;
+  uint16_t stepsPerRotation = DefaultStepsPerOutputRotation;
+};
+
+Preferences preferences;
+WebServer server(80);
+AppConfig config;
+OperationState opState = STANDBY;
+MotorPhase motorPhase = MOTOR_IDLE;
+TouchState touchState = TOUCH_STANDBY;
+TouchType touchType = NONE;
+bool currentOperationManual = false;
+bool autoDailySuppressedByManualStop = false;
+int dailyTurnDate = 0;
+uint16_t completedTurnsToday = 0;
+uint16_t activeBurstTurns = 0;
+long activeBurstStartPosition = 0;
+unsigned long restUntil = 0;
+bool singleTurnTestMode = false;
+
+struct TouchButton {
+  byte wasPressed = LOW;
+  byte isPressed = LOW;
+};
+
+TouchButton touch;
+
+// IN1-IN3-IN2-IN4
+AccelStepper motor1(Halfstep, 4, 6, 5, 7);
+
+float degreeNormal = 180;
+float degreeCalibration = 360;
+
+void setup(void) {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println();
+  Serial.println("watch_winder firmware started");
+  Serial.printf("Build: %s %s\n", __DATE__, __TIME__);
+  Serial.printf("Chip model: %s, revision: %d, CPU: %d MHz\n", ESP.getChipModel(), ESP.getChipRevision(), ESP.getCpuFreqMHz());
+  Serial.printf("Flash size: %u bytes\n", ESP.getFlashChipSize());
+  Serial.println("Motor outputs disabled until an operation starts.");
+  loadConfig();
+  Serial.printf("Configured winding: %u TPD, direction=%s, %u RPM, %u turns/burst, %u rest minute(s), steps/rotation=%u, calibration=%u steps/s\n",
+                config.turnsPerDay, directionName(), config.activeRpm, config.turnsPerBurst, config.restMinutes, config.stepsPerRotation, config.calibrationSpeed);
+
+  motor1.setMaxSpeed(1000.0);
+  motor1.setAcceleration(400);
+  motor1.setSpeed(0);
+  motor1.setCurrentPosition(0);
+  motor1.disableOutputs();
+  pinMode(BUTTON_PIN, INPUT_PULLDOWN);
+  rawTouchPressed = isTouchPressed(BUTTON_PIN);
+  lastRawTouchPressed = rawTouchPressed;
+  touch.isPressed = rawTouchPressed;
+  touch.wasPressed = rawTouchPressed;
+  rawTouchChangedAt = millis();
+  Serial.printf("Touch/button input: GPIO%d, INPUT_PULLDOWN, debounce=%d ms\n", BUTTON_PIN, TOUCH_DEBOUNCE_MS);
+  Serial.println("Ready. Short touch starts/stops operation; long touch enters calibration.");
+  setupWiFi();
+  setupWebServer();
+  setupMdns();
+  startupLogUntil = millis() + STARTUP_LOG_WINDOW_MS;
+}
+
+void loop(void) {
+  server.handleClient();
+  processDeferredRestart();
+  if (restartPending) {
+    return;
+  }
+
+  logStartupHeartbeat();
+  updateDebouncedTouch();
+  updateDailyTurnCounter();
+
+  processTouch();
+  processAutoDailyWinding();
+  processOperating();
+}
+
+void processTouch() {
+  if (touchState == TOUCH_STANDBY && touch.isPressed) {
+    touchStart = millis();
+    setTouchState(TOUCH_START);
+  } else if (touchState == TOUCH_START) {
+    setTouchState(TOUCH);
+  } else if (touchState == TOUCH) {
+    if (!touch.isPressed) {
+      setTouchState(TOUCH_STOP);
+      if (millis() - touchStart < LONGPRESS_MS) {
+        setTouchType(SIMPLE, "released before long-press threshold");
+      }
+    } else {
+      if (millis() - touchStart >= LONGPRESS_MS && touchType != LONG) {
+        setTouchType(LONG, "held past long-press threshold");
+      }
+    }
+  } else if (touchState == TOUCH_STOP) {
+    setTouchState(TOUCH_STANDBY);
+  }
+}
+
+void processOperating() {
+  if (opState == STANDBY && touchType == LONG) {
+    setOperationState(CALIBRATION_ENTRY, "long touch");
+  } else if (opState == STANDBY && touchType == SIMPLE) {
+    currentOperationManual = true;
+    setOperationState(OPERATION_START, "short touch");
+  } else if (opState == CALIBRATION_ENTRY) {
+    bool quickFollowUp = lastCalibrationEndedAt > 0 && millis() - lastCalibrationEndedAt <= CALIBRATION_REVERSE_WINDOW_MS;
+    calibrationDirection = quickFollowUp ? -lastCalibrationDirection : 1;
+    motor1.setMaxSpeed(config.calibrationSpeed + 40.0);
+    motor1.setAcceleration(100);
+    motor1.setCurrentPosition(0);
+    motor1.setSpeed(config.calibrationSpeed * calibrationDirection);
+    motor1.enableOutputs();
+    Serial.printf("Calibration mode: motor enabled while touch is held, rotating %s%s.\n",
+                  calibrationDirection > 0 ? "clockwise" : "counter clockwise",
+                  quickFollowUp ? " after quick follow-up long touch" : "");
+
+    setOperationState(CALIBRATION, "calibration configured");
+  } else if (opState == CALIBRATION) {
+    if (touchState == TOUCH) {
+      motor1.runSpeed();
+    } else {
+      motor1.stop();
+      setOperationState(CALIBRATION_STOP, "touch released");
+    }
+  } else if (opState == CALIBRATION_STOP) {
+    motor1.setCurrentPosition(0);
+    motor1.disableOutputs();
+    lastCalibrationEndedAt = millis();
+    lastCalibrationDirection = calibrationDirection;
+    Serial.println("Calibration stopped. Position reset to 0 and motor outputs disabled.");
+    setOperationState(STANDBY, "calibration complete");
+    setTouchType(NONE, "calibration consumed touch");
+  } else if (opState == OPERATION_START) {
+    applyMotorMotion(rpmToStepsPerSecond(config.activeRpm));
+    runTimes = 0;
+    motorPhase = MOTOR_IDLE;
+    activeBurstTurns = 0;
+    activeBurstStartPosition = motor1.currentPosition();
+    restUntil = 0;
+    if (!dailyTurnLimitReached()) {
+      Serial.printf("Starting %s run. Remaining turns today: %u/%u.\n", currentOperationManual ? "manual" : "automatic", remainingTurnsToday(), config.turnsPerDay);
+      startConfiguredBurst(turnsForNextBurst());
+    } else {
+      Serial.printf("Operation start skipped because today's TPD target is complete: %u/%u.\n", completedTurnsToday, config.turnsPerDay);
+      setOperationState(OPERATION_STOP, "daily TPD complete");
+    }
+    setTouchType(NONE, "operation consumed touch");
+    if (opState != OPERATION_STOP) {
+      setOperationState(OPERATION, "operation configured");
+    }
+  } else if (opState == OPERATION) {
+    if (touchType == SIMPLE) {
+      autoDailySuppressedByManualStop = true;
+      setOperationState(OPERATION_STOP, "short touch stop");
+      setTouchType(NONE, "stop consumed touch");
+      moveToNearestCenter("manual stop requested");
+    } else {
+      if (motorPhase == MOTOR_REST) {
+        if (millis() >= restUntil) {
+          motorPhase = MOTOR_IDLE;
+          if (dailyTurnLimitReached()) {
+            setOperationState(OPERATION_STOP, "daily TPD complete");
+          } else if (!currentOperationManual && !config.autoDailyWinding) {
+            setOperationState(OPERATION_STOP, "automatic daily winding disabled");
+          } else {
+            startConfiguredBurst(turnsForNextBurst());
+          }
+        }
+      } else if (motor1.distanceToGo() == 0) {
+        recordCompletedTurns(activeBurstTurns);
+        if (singleTurnTestMode) {
+          motorPhase = MOTOR_IDLE;
+          setOperationState(OPERATION_STOP, "one-turn test complete");
+          moveToNearestCenter("one-turn test complete");
+        } else if (dailyTurnLimitReached()) {
+          motorPhase = MOTOR_IDLE;
+          setOperationState(OPERATION_STOP, "daily TPD complete");
+        } else if (!currentOperationManual && !config.autoDailyWinding) {
+          motorPhase = MOTOR_IDLE;
+          setOperationState(OPERATION_STOP, "automatic daily winding disabled");
+        } else {
+          motorPhase = MOTOR_REST;
+          restUntil = millis() + ((unsigned long)config.restMinutes * 60000UL);
+          if (config.disableMotorDuringRest) {
+            motor1.disableOutputs();
+          } else {
+            motor1.enableOutputs();
+          }
+          Serial.printf("Burst complete. Resting for %u minute(s) with motor outputs %s.\n", config.restMinutes, config.disableMotorDuringRest ? "disabled" : "enabled");
+        }
+      }
+    }
+  } else if (opState == OPERATION_STOP && motor1.distanceToGo() == 0) {
+    motor1.setCurrentPosition(0);
+    setOperationState(STANDBY, "returned to position 0");
+    runTimes = 0;
+    currentOperationManual = false;
+    singleTurnTestMode = false;
+    persistDailyTurnCounter();
+    motor1.disableOutputs();
+    Serial.println("Operation stopped. Motor outputs disabled.");
+  }
+
+  if (opState != STANDBY && opState != CALIBRATION) {
+    motor1.run();
+  }
+}
+
+bool isTouchPressed(int pin) {
+  return digitalRead(pin) == HIGH;
+}
+
+void processDeferredRestart() {
+  if (!restartPending || millis() < restartAt) {
+    return;
+  }
+
+  Serial.println("Performing deferred restart now.");
+  motor1.moveTo(motor1.currentPosition());
+  motor1.disableOutputs();
+  server.close();
+  WiFi.disconnect(false);
+  WiFi.mode(WIFI_OFF);
+  delay(250);
+  ESP.restart();
+}
+
+void processAutoDailyWinding() {
+  if (firmwareUpdateInProgress) {
+    return;
+  }
+
+  if (config.autoDailyWinding && opState == STANDBY && touchType == NONE && !autoDailySuppressedByManualStop && remainingTurnsToday() > 0) {
+    currentOperationManual = false;
+    setOperationState(OPERATION_START, "automatic daily winding");
+  }
+}
+
+void updateDebouncedTouch() {
+  rawTouchPressed = isTouchPressed(BUTTON_PIN);
+  unsigned long now = millis();
+
+  if (rawTouchPressed != lastRawTouchPressed) {
+    lastRawTouchPressed = rawTouchPressed;
+    rawTouchChangedAt = now;
+    Serial.printf("GPIO%d raw %s at %lu ms\n", BUTTON_PIN, rawTouchPressed ? "HIGH" : "LOW", now);
+  }
+
+  if (touch.isPressed != rawTouchPressed && now - rawTouchChangedAt >= TOUCH_DEBOUNCE_MS) {
+    touch.wasPressed = touch.isPressed;
+    touch.isPressed = rawTouchPressed;
+    logButtonEdge(touch.isPressed);
+  }
+}
+
+void loadConfig() {
+  preferences.begin("watchwinder", true);
+  config.wifiSsid = preferences.getString("wifiSsid", "");
+  config.wifiPassword = preferences.getString("wifiPass", "");
+  config.direction = (RotationDirection)preferences.getUChar("dir", preferences.getBool("dirCcw", false) ? DIRECTION_CCW : DIRECTION_CW);
+  if (config.direction > DIRECTION_BOTH) {
+    config.direction = DIRECTION_CW;
+  }
+  config.turnsPerDay = preferences.getUShort("tpd", 650);
+  config.activeRpm = preferences.getUShort("rpm", 6);
+  config.turnsPerBurst = preferences.getUShort("burst", 10);
+  config.restMinutes = preferences.getUShort("restMin", 5);
+  config.stepsPerRotation = preferences.getUShort("stepsRot", DefaultStepsPerOutputRotation);
+  config.calibrationSpeed = preferences.getUShort("calSpd", CALIBRATION_SPEED_STEPS_PER_SEC);
+  config.disableMotorDuringRest = preferences.getBool("idleOff", true);
+  config.manualRunUsesDailyLimit = preferences.getBool("manualTpd", true);
+  config.autoDailyWinding = preferences.getBool("autoDaily", preferences.getBool("sch0En", false));
+  dailyTurnDate = preferences.getInt("turnDate", 0);
+  completedTurnsToday = preferences.getUShort("turnsDone", 0);
+  autoDailySuppressedByManualStop = preferences.getBool("autoSupp", false);
+  selectedProfileSlot = constrain(preferences.getUChar("selProfile", 0), 0, WATCH_PROFILES - 1);
+  preferences.end();
+}
+
+void saveConfig() {
+  preferences.begin("watchwinder", false);
+  preferences.putString("wifiSsid", config.wifiSsid);
+  preferences.putString("wifiPass", config.wifiPassword);
+  preferences.putUChar("dir", config.direction);
+  preferences.putBool("dirCcw", config.direction == DIRECTION_CCW);
+  preferences.putUShort("tpd", config.turnsPerDay);
+  preferences.putUShort("rpm", config.activeRpm);
+  preferences.putUShort("burst", config.turnsPerBurst);
+  preferences.putUShort("restMin", config.restMinutes);
+  preferences.putUShort("stepsRot", config.stepsPerRotation);
+  preferences.putUShort("calSpd", config.calibrationSpeed);
+  preferences.putBool("idleOff", config.disableMotorDuringRest);
+  preferences.putBool("manualTpd", config.manualRunUsesDailyLimit);
+  preferences.putBool("autoDaily", config.autoDailyWinding);
+  preferences.putUChar("selProfile", selectedProfileSlot);
+  preferences.end();
+}
+
+void parseConfigFromRequest() {
+  config.wifiSsid = server.arg("ssid");
+  config.wifiPassword = server.arg("password");
+  String direction = server.arg("direction");
+  if (direction == "both") {
+    config.direction = DIRECTION_BOTH;
+  } else if (direction == "ccw") {
+    config.direction = DIRECTION_CCW;
+  } else {
+    config.direction = DIRECTION_CW;
+  }
+  config.turnsPerDay = constrain(server.arg("tpd").toInt(), 1, 2000);
+  config.activeRpm = constrain(server.arg("rpm").toInt(), 4, 10);
+  config.turnsPerBurst = constrain(server.arg("burst").toInt(), 1, 100);
+  config.restMinutes = constrain(server.arg("restMin").toInt(), 0, 240);
+  config.stepsPerRotation = constrain(server.arg("stepsRot").toInt(), 3900, 4300);
+  config.calibrationSpeed = constrain(server.arg("calSpd").toInt(), 60, 180);
+  config.disableMotorDuringRest = server.hasArg("idleOff");
+  config.manualRunUsesDailyLimit = server.hasArg("manualTpd");
+  config.autoDailyWinding = server.hasArg("autoDaily");
+}
+
+void setupWiFi() {
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setHostname(MDNS_HOSTNAME);
+
+  if (config.wifiSsid.length() > 0) {
+    Serial.printf("Connecting to Wi-Fi SSID '%s'", config.wifiSsid.c_str());
+    WiFi.begin(config.wifiSsid.c_str(), config.wifiPassword.c_str());
+    unsigned long startedAt = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startedAt < WIFI_CONNECT_TIMEOUT_MS) {
+      delay(250);
+      Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("Wi-Fi connected. Config page: http://%s/\n", WiFi.localIP().toString().c_str());
+      Serial.printf("Friendly config URL: http://%s.local/\n", MDNS_HOSTNAME);
+      setupTime();
+      return;
+    }
+
+    Serial.println("Wi-Fi connection failed. Starting setup access point.");
+  } else {
+    Serial.println("No saved Wi-Fi SSID. Starting setup access point.");
+  }
+
+  WiFi.softAP("WatchWinder-Setup");
+  Serial.printf("Setup access point started. Connect to 'WatchWinder-Setup', then open http://%s/\n", WiFi.softAPIP().toString().c_str());
+}
+
+void setupTime() {
+  configTzTime(LOCAL_TIME_ZONE, "pool.ntp.org", "time.nist.gov");
+  Serial.print("Syncing local time");
+  unsigned long startedAt = millis();
+  struct tm timeInfo;
+  while (!getLocalTime(&timeInfo, 250) && millis() - startedAt < NTP_SYNC_TIMEOUT_MS) {
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (getLocalTime(&timeInfo, 100)) {
+    char buffer[32];
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeInfo);
+    Serial.printf("Local time synced: %s\n", buffer);
+  } else {
+    Serial.println("Local time sync failed. Daily counter reset will wait until time is available.");
+  }
+}
+
+void setupWebServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/action", HTTP_POST, handleAction);
+  server.on("/profile", HTTP_POST, handleProfile);
+  server.on("/restart", HTTP_POST, handleRestart);
+  server.on("/update", HTTP_GET, handleUpdatePage);
+  server.on("/prepare-update", HTTP_POST, handlePrepareUpdate);
+  server.on("/update", HTTP_POST, handleUpdateFinished, handleFirmwareUpload);
+  server.begin();
+  Serial.println("Configuration web server started.");
+}
+
+void setupMdns() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("mDNS not started because the device is not connected to Wi-Fi.");
+    return;
+  }
+
+  if (!MDNS.begin(MDNS_HOSTNAME)) {
+    Serial.println("mDNS responder failed to start.");
+    return;
+  }
+
+  MDNS.addService("http", "tcp", 80);
+  Serial.printf("mDNS responder started: http://%s.local/\n", MDNS_HOSTNAME);
+}
+
+void handleRoot() {
+  String page;
+  page.reserve(7600);
+  page += pageStart("ChronoWinder");
+  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Settings</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header><p class=\"status\">");
+  if (WiFi.status() == WL_CONNECTED) {
+    page += "Connected to ";
+    page += htmlEscape(WiFi.SSID());
+    page += " at ";
+    page += WiFi.localIP().toString();
+    page += " or http://";
+    page += MDNS_HOSTNAME;
+    page += ".local/";
+  } else {
+    page += "Setup access point active at ";
+    page += WiFi.softAPIP().toString();
+  }
+  page += F("</p>");
+  page += F("<form id=\"settingsForm\" method=\"post\" action=\"/save\">");
+  page += F("<section class=\"panel\"><h2>Wi-Fi</h2>");
+  page += F("<label>Wi-Fi SSID<input name=\"ssid\" value=\"");
+  page += htmlEscape(config.wifiSsid);
+  page += F("\" autocomplete=\"off\"></label>");
+  page += F("<label>Wi-Fi password<input name=\"password\" type=\"password\" value=\"");
+  page += htmlEscape(config.wifiPassword);
+  page += F("\"></label>");
+  page += F("</section><section class=\"panel\"><h2>Winding</h2>");
+  page += F("<a class=\"resourceLink\" href=\"https://watch-winder.store/watch-winding-table/\" target=\"_blank\" rel=\"noopener\">Watch winding table</a>");
+  page += F("<label>Rotation direction<select name=\"direction\">");
+  page += F("<option value=\"cw\"");
+  if (config.direction == DIRECTION_CW) {
+    page += F(" selected");
+  }
+  page += F(">Clockwise</option><option value=\"ccw\"");
+  if (config.direction == DIRECTION_CCW) {
+    page += F(" selected");
+  }
+  page += F(">Counter clockwise</option><option value=\"both\"");
+  if (config.direction == DIRECTION_BOTH) {
+    page += F(" selected");
+  }
+  page += F(">Both</option></select></label>");
+  page += F("<label>Turns per day (TPD)<input name=\"tpd\" type=\"number\" min=\"1\" max=\"2000\" value=\"");
+  page += String(config.turnsPerDay);
+  page += F("\"></label>");
+  page += F("<label>Active RPM (Typically 4 RPM - 10 RPM)<input name=\"rpm\" type=\"number\" min=\"4\" max=\"10\" value=\"");
+  page += String(config.activeRpm);
+  page += F("\"></label>");
+  page += F("<label>Turns per burst (Typically 3 - 6)<input name=\"burst\" type=\"number\" min=\"1\" max=\"100\" value=\"");
+  page += String(config.turnsPerBurst);
+  page += F("\"></label>");
+  page += F("<label>Rest minutes between bursts (Typically 4 - 8)<input name=\"restMin\" type=\"number\" min=\"0\" max=\"240\" value=\"");
+  page += String(config.restMinutes);
+  page += F("\"></label>");
+  page += F("<label>Steps per full rotation (increase if each turn stops short)<input name=\"stepsRot\" type=\"number\" min=\"3900\" max=\"4300\" value=\"");
+  page += String(config.stepsPerRotation);
+  page += F("\"></label>");
+  page += F("<label>Centering speed<select name=\"calSpd\">");
+  page += F("<option value=\"60\"");
+  if (config.calibrationSpeed <= 60) {
+    page += F(" selected");
+  }
+  page += F(">Slow</option><option value=\"120\"");
+  if (config.calibrationSpeed > 60 && config.calibrationSpeed <= 120) {
+    page += F(" selected");
+  }
+  page += F(">Medium</option><option value=\"180\"");
+  if (config.calibrationSpeed > 120) {
+    page += F(" selected");
+  }
+  page += F(">Fast</option></select></label>");
+  page += F("<label class=\"check\"><input type=\"checkbox\" name=\"idleOff\"");
+  if (config.disableMotorDuringRest) {
+    page += F(" checked");
+  }
+  page += F(">Disable motor during rest</label>");
+  page += F("<label class=\"check\"><input type=\"checkbox\" name=\"manualTpd\"");
+  if (config.manualRunUsesDailyLimit) {
+    page += F(" checked");
+  }
+  page += F(">Manual starts count toward daily TPD</label>");
+  page += F("<label class=\"check\"><input type=\"checkbox\" name=\"autoDaily\"");
+  if (config.autoDailyWinding) {
+    page += F(" checked");
+  }
+  page += F(">Automatic daily winding</label>");
+  page += F("<p class=\"status\">Completed today: ");
+  page += String(completedTurnsToday);
+  page += F(" / ");
+  page += String(config.turnsPerDay);
+  page += F(" turns.</p>");
+  page += F("</section><section class=\"panel\"><h2>Watch Profiles</h2>");
+  page += F("<label>Profile<select id=\"profileSlot\" name=\"profileSlot\">");
+  for (int i = 0; i < WATCH_PROFILES; i++) {
+    page += F("<option value=\"");
+    page += String(i);
+    if (i == selectedProfileSlot) {
+      page += F("\" selected>");
+    } else {
+      page += F("\">");
+    }
+    page += String(i + 1);
+    page += F(" - ");
+    page += htmlEscape(profileName(i));
+    page += F("</option>");
+  }
+  page += F("</select></label><label>Profile name<input id=\"profileName\" name=\"profileName\" value=\"");
+  page += htmlEscape(profileName(selectedProfileSlot));
+  page += F("\" maxlength=\"24\"></label><div class=\"actions\"><button name=\"profileAction\" value=\"save\" type=\"submit\">Save current</button></div>");
+  page += F("<script>const profileNames=[");
+  for (int i = 0; i < WATCH_PROFILES; i++) {
+    if (i > 0) {
+      page += F(",");
+    }
+    page += F("'");
+    page += jsStringEscape(profileName(i));
+    page += F("'");
+  }
+  page += F("],settingsForm=document.getElementById('settingsForm'),profileSlot=document.getElementById('profileSlot'),profileNameInput=document.getElementById('profileName');profileSlot.addEventListener('change',()=>{profileNameInput.value=profileNames[profileSlot.value]||'';const action=document.createElement('input');action.type='hidden';action.name='profileAction';action.value='load';settingsForm.appendChild(action);settingsForm.submit();});</script>");
+  page += F("</section><button class=\"primary\" name=\"saveAction\" value=\"settings\" type=\"submit\">Save settings</button>");
+  page += F("</form>");
+  page += pageEnd();
+  server.send(200, "text/html", page);
+}
+
+void handleStatus() {
+  String page;
+  page.reserve(2800);
+  page += pageStart("Winder Status");
+  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Status</h1></div><nav><a href=\"/\">Settings</a><a class=\"active\" href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header><section class=\"panel\"><h2>Current State</h2><div class=\"metrics\">");
+  page += statusTile("State", operationStateName(opState));
+  page += statusTile("Phase", phaseName());
+  page += statusTile("Burst turn", burstProgressText());
+  page += statusTile("Completed today", String(completedTurnsToday) + " / " + String(config.turnsPerDay));
+  page += statusTile("Auto daily", config.autoDailyWinding ? "On" : "Off");
+  page += statusTile("Direction", directionName());
+  page += F("</div><p class=\"status next\">");
+  page += nextActionText();
+  page += F("</p></section><section class=\"panel\"><h2>Actions</h2><div class=\"actions\">");
+  page += actionButton("testTurn", "Run one turn");
+  page += actionButton("center", "Return to center");
+  page += actionButton("resetCounter", "Reset today's turns");
+  page += F("</div></section>");
+  page += pageEnd();
+  server.sendHeader("Refresh", "5");
+  server.send(200, "text/html", page);
+}
+
+void handleSave() {
+  String profileAction = server.arg("profileAction");
+  if (profileAction == "load" || profileAction.startsWith("load:")) {
+    uint8_t slot = profileAction.startsWith("load:")
+                       ? constrain(profileAction.substring(5).toInt(), 0, WATCH_PROFILES - 1)
+                       : constrain(server.arg("profileSlot").toInt(), 0, WATCH_PROFILES - 1);
+    selectedProfileSlot = slot;
+    loadProfile(slot);
+    saveConfig();
+    Serial.printf("Loaded profile %u: %s\n", slot + 1, profileName(slot).c_str());
+    server.sendHeader("Location", "/");
+    server.send(303, "text/plain", "See Other");
+    return;
+  }
+
+  parseConfigFromRequest();
+  selectedProfileSlot = constrain(server.arg("profileSlot").toInt(), 0, WATCH_PROFILES - 1);
+  saveConfig();
+
+  if (profileAction == "save" || profileAction.startsWith("save:")) {
+    uint8_t slot = profileAction.startsWith("save:")
+                       ? constrain(profileAction.substring(5).toInt(), 0, WATCH_PROFILES - 1)
+                       : constrain(server.arg("profileSlot").toInt(), 0, WATCH_PROFILES - 1);
+    selectedProfileSlot = slot;
+    String name = profileAction.startsWith("save:") ? server.arg("p" + String(slot) + "Name") : server.arg("profileName");
+    name.trim();
+    if (name.length() == 0) {
+      name = "Profile " + String(slot + 1);
+    }
+    preferences.begin("watchwinder", false);
+    char key[12];
+    snprintf(key, sizeof(key), "p%dName", slot);
+    preferences.putString(key, name.substring(0, 24));
+    preferences.end();
+    saveProfile(slot);
+    saveConfig();
+    Serial.printf("Saved current settings to profile %u: %s\n", slot + 1, name.c_str());
+    server.sendHeader("Location", "/");
+    server.send(303, "text/plain", "See Other");
+    return;
+  }
+
+  Serial.printf("Saved config: SSID='%s', direction=%s, TPD=%u, RPM=%u, burst=%u, rest=%u, steps/rotation=%u, calibration=%u\n",
+                config.wifiSsid.c_str(), directionName(), config.turnsPerDay, config.activeRpm, config.turnsPerBurst, config.restMinutes, config.stepsPerRotation, config.calibrationSpeed);
+  autoDailySuppressedByManualStop = false;
+  persistDailyTurnCounter();
+  bool centered = centerAndStopForMaintenance("settings saved");
+  String page = pageStart("Settings saved");
+  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Restarting</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header>");
+  page += F("<section class=\"panel\"><h2>Settings saved</h2><div class=\"checklist\"><div><span class=\"badge ok\">OK</span>Settings saved</div><div><span class=\"badge ");
+  page += centered ? F("ok\">OK") : F("notok\">NOT OK");
+  page += F("</span>Center watch before restart</div><div><span class=\"badge ok\">OK</span>Restart queued</div></div><p class=\"status\">The device is restarting. The Settings page will reload automatically in a few seconds.</p></section>");
+  page += F("<script>setTimeout(()=>{location.href='/'},8000);</script>");
+  page += pageEnd();
+  server.sendHeader("Connection", "close");
+  server.sendHeader("Refresh", "8; url=/");
+  server.send(200, "text/html", page);
+  requestRestart("settings saved");
+}
+
+void handleAction() {
+  String command = server.arg("command");
+
+  if (command == "resetCounter") {
+    resetDailyCounter();
+  } else if (command == "testTurn") {
+    if (opState == STANDBY) {
+      singleTurnTestMode = true;
+      currentOperationManual = true;
+      setOperationState(OPERATION_START, "web one-turn test");
+    }
+  } else if (command == "center") {
+    if (opState == STANDBY) {
+      moveToNearestCenter("web center requested");
+      setOperationState(OPERATION_STOP, "web center requested");
+    } else {
+      stopWinderNow("web center requested");
+    }
+  }
+
+  server.sendHeader("Location", "/status");
+  server.send(303, "text/plain", "See Other");
+}
+
+void handleProfile() {
+  uint8_t slot = constrain(server.arg("slot").toInt(), 0, WATCH_PROFILES - 1);
+  String action = server.arg("action");
+  selectedProfileSlot = slot;
+
+  if (action == "save") {
+    String name = server.arg("name");
+    name.trim();
+    if (name.length() == 0) {
+      name = "Profile " + String(slot + 1);
+    }
+    preferences.begin("watchwinder", false);
+    char key[12];
+    snprintf(key, sizeof(key), "p%dName", slot);
+    preferences.putString(key, name.substring(0, 24));
+    preferences.end();
+    saveProfile(slot);
+    saveConfig();
+    Serial.printf("Saved profile %u: %s\n", slot + 1, name.c_str());
+  } else if (action == "load") {
+    loadProfile(slot);
+    saveConfig();
+    Serial.printf("Loaded profile %u: %s\n", slot + 1, profileName(slot).c_str());
+  }
+
+  server.sendHeader("Location", "/");
+  server.send(303, "text/plain", "See Other");
+}
+
+void handleRestart() {
+  Serial.println("Restart requested from web page.");
+  String page = pageStart("Restarting");
+  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Restarting</h1></div><nav><a class=\"active\" href=\"/\">Settings</a><a href=\"/status\">Status</a><a href=\"/update\">Firmware</a></nav></header>");
+  page += F("<section class=\"panel\"><h2>Restart queued</h2><p class=\"status\">The device is restarting. The Settings page will reload automatically in a few seconds.</p></section>");
+  page += F("<script>setTimeout(()=>{location.href='/'},8000);</script>");
+  page += pageEnd();
+  server.sendHeader("Connection", "close");
+  server.sendHeader("Refresh", "8; url=/");
+  server.send(200, "text/html", page);
+  requestRestart("web restart requested");
+}
+
+void handleUpdatePage() {
+  String page;
+  page.reserve(2600);
+  page += pageStart("Firmware Update");
+  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Firmware</h1></div><nav><a href=\"/\">Settings</a><a href=\"/status\">Status</a><a class=\"active\" href=\"/update\">Firmware</a></nav></header>");
+  page += F("<section class=\"panel\"><h2>Upload Firmware</h2><div class=\"hint\"><span>Expected file</span><code>.pio/build/esp32-c3-devkitm-1/firmware.bin</code></div>");
+  page += F("<form id=\"updateForm\" method=\"post\" action=\"/update\" enctype=\"multipart/form-data\">");
+  page += F("<label class=\"uploadBox\"><span>Choose firmware .bin</span><small id=\"fileName\">No file selected</small><input type=\"file\" name=\"firmware\" accept=\".bin\"></label>");
+  page += F("<button id=\"uploadButton\" class=\"primary\" type=\"submit\" disabled>Upload firmware</button></form>");
+  page += F("<div class=\"progressBox\"><progress id=\"progress\" max=\"100\" value=\"0\"></progress><div id=\"percent\" class=\"percent\">0%</div><p id=\"stage\" class=\"stage\">Waiting</p><p id=\"message\" class=\"message\">Waiting for firmware file.</p></div></section>");
+  page += F("<section class=\"panel\"><h2>Update Checks</h2><div class=\"checklist\"><div><span id=\"extCheck\" class=\"badge pending\">WAIT</span>.bin file extension required</div><div><span id=\"sizeCheck\" class=\"badge pending\">WAIT</span>Minimum firmware size checked</div><div><span id=\"centerCheck\" class=\"badge pending\">WAIT</span>Center watch before upload</div><div><span class=\"badge pending\">UPLOAD</span>ESP32 image validation before restart</div></div></section>");
+  page += F("<script>");
+  page += F("const minSize=");
+  page += String(MIN_FIRMWARE_SIZE_BYTES);
+  page += F(",form=document.getElementById('updateForm'),bar=document.getElementById('progress'),pct=document.getElementById('percent'),stage=document.getElementById('stage'),msg=document.getElementById('message'),fileName=document.getElementById('fileName'),btn=document.getElementById('uploadButton'),extCheck=document.getElementById('extCheck'),sizeCheck=document.getElementById('sizeCheck'),centerCheck=document.getElementById('centerCheck');");
+  page += F("function setStage(s,m){stage.textContent=s;msg.textContent=m;}");
+  page += F("function setBadge(el,ok,text){el.className='badge '+(ok?'ok':'notok');el.textContent=text;}function setWait(el){el.className='badge pending';el.textContent='WAIT';}");
+  page += F("form.firmware.addEventListener('change',()=>{const f=form.firmware.files[0];fileName.textContent=f?f.name:'No file selected';setWait(centerCheck);bar.value=0;pct.textContent='0%';if(!f){setWait(extCheck);setWait(sizeCheck);btn.disabled=true;setStage('Waiting','Waiting for firmware file.');return;}const extOk=f.name.toLowerCase().endsWith('.bin'),sizeOk=f.size>=minSize;setBadge(extCheck,extOk,extOk?'OK':'NOT OK');setBadge(sizeCheck,sizeOk,sizeOk?'OK':'NOT OK');btn.disabled=!(extOk&&sizeOk);setStage(extOk&&sizeOk?'Ready':'File check failed',extOk&&sizeOk?'Ready to upload.':'Selected file failed local checks.');});");
+  page += F("form.addEventListener('submit',e=>{e.preventDefault();const file=form.firmware.files[0];if(!file||btn.disabled){setStage('File check failed','Choose a valid firmware .bin file first.');return;}btn.disabled=true;");
+  page += F("setStage('Centering watch','Returning to position 0 before upload...');fetch('/prepare-update',{method:'POST'}).then(r=>{if(!r.ok)throw new Error('prepare failed');return r.text();}).then(()=>{setBadge(centerCheck,true,'OK');setStage('Uploading firmware','Sending firmware to the ESP32...');");
+  page += F("const xhr=new XMLHttpRequest();xhr.open('POST','/update');xhr.upload.onprogress=ev=>{if(ev.lengthComputable){const p=Math.round(ev.loaded*100/ev.total);bar.value=p;pct.textContent=p+'%';if(p>=100)setStage('Validating firmware','Upload complete. ESP32 is validating the image...');}};");
+  page += F("xhr.onload=()=>{setStage('Restarting','Firmware accepted. Restarting device...');document.open();document.write(xhr.responseText);document.close();};xhr.onerror=()=>{btn.disabled=false;setStage('Upload failed','Upload failed before validation.');};const data=new FormData();data.append('firmware',file,file.name);xhr.send(data);}).catch(()=>{btn.disabled=false;setBadge(centerCheck,false,'NOT OK');setStage('Centering failed','Could not center watch for update.');});});");
+  page += F("</script>");
+  page += pageEnd();
+  server.send(200, "text/html", page);
+}
+
+void handlePrepareUpdate() {
+  centerAndStopForFirmwareUpdate("firmware update requested");
+  server.send(200, "text/plain", "ready");
+}
+
+void handleUpdateFinished() {
+  bool updateOk = !firmwareUploadRejected && !Update.hasError();
+  String page = pageStart(updateOk ? "Firmware updated" : "Update failed");
+  page += F("<header class=\"top\"><div><p class=\"eyebrow\">ChronoWinder</p><h1>Firmware</h1></div><nav><a href=\"/\">Settings</a><a href=\"/status\">Status</a><a class=\"active\" href=\"/update\">Firmware</a></nav></header>");
+  if (updateOk) {
+    page += F("<section class=\"panel\"><h2>Firmware updated</h2><div class=\"checklist\"><div><span class=\"badge ok\">OK</span>ESP32 image validation passed</div><div><span class=\"badge ok\">OK</span>Restart queued</div></div><p class=\"status\">The device is restarting. The Settings page will reload automatically in a few seconds.</p></section>");
+    page += F("<script>setTimeout(()=>{location.href='/'},8000);</script>");
+  } else {
+    page += F("<section class=\"panel\"><h2>Update failed</h2><div class=\"checklist\"><div><span class=\"badge notok\">NOT OK</span>Firmware was not installed</div><div><span class=\"badge notok\">NOT OK</span>");
+    page += htmlEscape(firmwareUpdateError.length() > 0 ? firmwareUpdateError : "Firmware validation failed.");
+    page += F("</div></div></section>");
+  }
+  page += pageEnd();
+  server.sendHeader("Connection", "close");
+  if (updateOk) {
+    server.sendHeader("Refresh", "8; url=/");
+  }
+  server.send(updateOk ? 200 : 500, "text/html", page);
+  if (updateOk) {
+    autoDailySuppressedByManualStop = false;
+    persistDailyTurnCounter();
+    requestRestart("firmware update complete");
+  } else {
+    firmwareUpdateInProgress = false;
+  }
+}
+
+void handleFirmwareUpload() {
+  HTTPUpload &upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    firmwareUpdateInProgress = true;
+    firmwareUploadRejected = false;
+    firmwareUpdateError = "";
+    Serial.printf("Firmware upload started: %s\n", upload.filename.c_str());
+
+    if (!upload.filename.endsWith(".bin")) {
+      firmwareUploadRejected = true;
+      firmwareUpdateError = "Firmware filename must end with .bin.";
+      Serial.println(firmwareUpdateError);
+      return;
+    }
+
+    if (!firmwareUpdateInProgress) {
+      centerAndStopForFirmwareUpdate("firmware update direct upload");
+    } else {
+      motor1.disableOutputs();
+    }
+
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (firmwareUploadRejected) {
+      return;
+    }
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (firmwareUploadRejected) {
+      return;
+    }
+    if (upload.totalSize < MIN_FIRMWARE_SIZE_BYTES) {
+      firmwareUploadRejected = true;
+      firmwareUpdateError = "Firmware file is too small to be a valid application image.";
+      Update.abort();
+      Serial.println(firmwareUpdateError);
+      return;
+    }
+    if (Update.end(true)) {
+      Serial.printf("Firmware update complete: %u bytes\n", upload.totalSize);
+    } else {
+      firmwareUpdateError = "ESP32 firmware validation failed.";
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    firmwareUploadRejected = true;
+    firmwareUpdateError = "Firmware upload was aborted.";
+    Serial.println("Firmware update aborted.");
+  }
+}
+
+String pageStart(const String &title) {
+  String page;
+  page.reserve(2600);
+  page += F("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+  page += F("<title>");
+  page += htmlEscape(title);
+  page += F("</title><style>");
+  page += F("html{min-height:100%;background:#070b0f}");
+  page += F("body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:0;min-height:100%;color:#dce7ee;background:radial-gradient(circle at 20% 0%,rgba(57,200,183,.14),transparent 34%),linear-gradient(180deg,#0b1117,#070b0f)}");
+  page += F("*{box-sizing:border-box}.page{position:relative;max-width:680px;margin:0;padding:24px 18px 40px}h1{margin:0;font-size:24px;letter-spacing:0;color:#dce7ee}h2{margin:0 0 14px;font-size:17px;color:#f4f8fb}.eyebrow{margin:0 0 3px;color:#f4f8fb;font-size:28px;font-weight:850}");
+  page += F(".top{display:flex;justify-content:space-between;gap:16px;align-items:flex-end;margin-bottom:18px}nav{display:flex;gap:8px;flex-wrap:wrap}nav a{padding:8px 10px;border:1px solid #263541;background:#101820;color:#adc1cc;text-decoration:none;font-size:14px}nav a.active,nav a:hover{border-color:#39c8b7;color:#effffb;background:#13302f}");
+  page += F(".panel,.status{background:rgba(16,24,32,.9);border:1px solid #263541;box-shadow:0 14px 38px rgba(0,0,0,.28)}.panel{padding:16px;margin-top:16px}.status{padding:12px;color:#b9c8d2}p{line-height:1.45}label{display:block;margin-top:14px;color:#dce7ee;font-weight:700;font-size:14px}");
+  page += F(".metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{padding:14px;background:#0d151c;border:1px solid #263541}.metric span{display:block;color:#7f95a3;font-size:12px;font-weight:800;text-transform:uppercase}.metric strong{display:block;margin-top:6px;color:#f4f8fb;font-size:20px}.next{margin-bottom:0}");
+  page += F("input,select{width:100%;padding:11px 12px;margin-top:6px;font-size:16px;color:#eef7fb;background:#0c1218;border:1px solid #31414e;outline:none}input:focus,select:focus{border-color:#39c8b7;box-shadow:0 0 0 2px rgba(57,200,183,.16)}input[type=checkbox]{width:auto;margin-right:8px;accent-color:#39c8b7}");
+  page += F("button{border:1px solid #2d4350;background:#152331;color:#e7f4f8;padding:11px 14px;font-size:15px;font-weight:800;cursor:pointer}button:hover{border-color:#39c8b7;background:#173335}.primary{width:100%;margin-top:18px;background:#1b766f;border-color:#39c8b7;color:white}");
+  page += F(".resourceLink{display:block;margin-top:12px;padding:11px 12px;background:#102028;border:1px solid #2b5360;color:#63d6c6;text-decoration:none;font-weight:800}.resourceLink:hover{background:#13302f;border-color:#39c8b7;color:#effffb}");
+  page += F(".window{padding:12px;margin-top:12px;background:#0d151c;border:1px solid #263541}.window label{font-weight:600}.inline{display:flex;gap:12px}.inline label{flex:1}.check{display:flex;align-items:center}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}.actions form,.profile{margin:0}.actions button,.profile button{width:100%;margin-top:0}");
+  page += F(".profile{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:end;margin-top:12px;padding:10px;background:#0d151c;border:1px solid #263541}.profile label{margin-top:0}code{color:#63d6c6}.percent{font-weight:800;margin-top:8px;color:#63d6c6}progress{width:100%;height:24px;margin-top:18px;accent-color:#39c8b7}");
+  page += F(".hint{display:grid;gap:5px;padding:12px;background:#0d151c;border:1px solid #263541}.hint span,.uploadBox small{color:#7f95a3;font-size:12px;font-weight:800;text-transform:uppercase}.uploadBox{display:block;padding:18px;margin-top:14px;text-align:center;background:#0d151c;border:1px dashed #3a5261}.uploadBox span{display:block;color:#f4f8fb;font-size:18px}.uploadBox input{margin-top:12px}.progressBox{margin-top:16px}.stage{margin:10px 0 0;color:#f4f8fb;font-size:18px;font-weight:850}.message{margin:4px 0 0;color:#b9c8d2}.checklist{display:grid;gap:8px}.checklist div{padding:10px;background:#0d151c;border:1px solid #263541;color:#dce7ee}.badge{display:inline-block;margin-right:8px;padding:2px 7px;font-size:11px;font-weight:900}.badge.ok{background:#12382f;color:#63d6c6;border:1px solid #236a5a}.badge.notok{background:#3d1719;color:#ff8585;border:1px solid #8a2f35}.badge.pending{background:#242f39;color:#a9bac5;border:1px solid #3b4a57}button:disabled{opacity:.45;cursor:not-allowed}");
+  page += F("</style></head><body><main class=\"page\">");
+  return page;
+}
+
+String pageEnd() {
+  return F("</main></body></html>");
+}
+
+String htmlEscape(const String &value) {
+  String escaped = value;
+  escaped.replace("&", "&amp;");
+  escaped.replace("\"", "&quot;");
+  escaped.replace("<", "&lt;");
+  escaped.replace(">", "&gt;");
+  return escaped;
+}
+
+String jsStringEscape(const String &value) {
+  String escaped = value;
+  escaped.replace("\\", "\\\\");
+  escaped.replace("'", "\\'");
+  escaped.replace("\r", "");
+  escaped.replace("\n", " ");
+  escaped.replace("</", "<\\/");
+  return escaped;
+}
+
+void updateDailyTurnCounter() {
+  int today = currentDateKey();
+  if (today == 0 || today == dailyTurnDate) {
+    return;
+  }
+
+  dailyTurnDate = today;
+  completedTurnsToday = 0;
+  autoDailySuppressedByManualStop = false;
+  persistDailyTurnCounter();
+  Serial.printf("New local day detected. TPD counter reset for %d.\n", dailyTurnDate);
+}
+
+int currentDateKey() {
+  struct tm timeInfo;
+  if (!getLocalTime(&timeInfo, 5)) {
+    return dailyTurnDate;
+  }
+  return (timeInfo.tm_year + 1900) * 10000 + (timeInfo.tm_mon + 1) * 100 + timeInfo.tm_mday;
+}
+
+uint16_t remainingTurnsToday() {
+  updateDailyTurnCounter();
+  if (!shouldUseDailyTurnLimit()) {
+    return config.turnsPerBurst;
+  }
+  if (completedTurnsToday >= config.turnsPerDay) {
+    return 0;
+  }
+  return config.turnsPerDay - completedTurnsToday;
+}
+
+void recordCompletedTurns(uint16_t turns) {
+  if (!shouldUseDailyTurnLimit()) {
+    motor1.setCurrentPosition(0);
+    Serial.printf("Completed %u test/manual turn(s). Daily progress unchanged: %u/%u.\n", turns, completedTurnsToday, config.turnsPerDay);
+    return;
+  }
+
+  completedTurnsToday = min<uint16_t>(config.turnsPerDay, completedTurnsToday + turns);
+
+  motor1.setCurrentPosition(0);
+  Serial.printf("Completed burst of %u turn(s). Daily progress: %u/%u.\n", turns, completedTurnsToday, config.turnsPerDay);
+
+  if (completedTurnsToday % 10 == 0 || completedTurnsToday >= config.turnsPerDay) {
+    persistDailyTurnCounter();
+  }
+}
+
+void persistDailyTurnCounter() {
+  preferences.begin("watchwinder", false);
+  preferences.putInt("turnDate", dailyTurnDate);
+  preferences.putUShort("turnsDone", completedTurnsToday);
+  preferences.putBool("autoSupp", autoDailySuppressedByManualStop);
+  preferences.end();
+}
+
+uint16_t turnsForNextBurst() {
+  if (singleTurnTestMode) {
+    return 1;
+  }
+  if (!shouldUseDailyTurnLimit()) {
+    return config.turnsPerBurst;
+  }
+  return min<uint16_t>(config.turnsPerBurst, remainingTurnsToday());
+}
+
+bool shouldUseDailyTurnLimit() {
+  if (singleTurnTestMode) {
+    return false;
+  }
+  return !currentOperationManual || config.manualRunUsesDailyLimit;
+}
+
+bool dailyTurnLimitReached() {
+  return shouldUseDailyTurnLimit() && remainingTurnsToday() == 0;
+}
+
+void startConfiguredBurst(uint16_t turns) {
+  if (turns == 0) {
+    setOperationState(OPERATION_STOP, "daily TPD complete");
+    return;
+  }
+
+  motor1.enableOutputs();
+  motor1.setCurrentPosition(motor1.currentPosition());
+  applyMotorMotion(rpmToStepsPerSecond(config.activeRpm));
+  long steps = (long)turns * config.stepsPerRotation;
+  activeBurstTurns = turns;
+  activeBurstStartPosition = motor1.currentPosition();
+  bool runCcw = config.direction == DIRECTION_CCW;
+  if (config.direction == DIRECTION_BOTH) {
+    runCcw = nextBothBurstCcw;
+    nextBothBurstCcw = !nextBothBurstCcw;
+  }
+  if (runCcw) {
+    motorPhase = MOTOR_CCW;
+    motor1.moveTo(motor1.currentPosition() - steps);
+  } else {
+    motorPhase = MOTOR_CW;
+    motor1.moveTo(motor1.currentPosition() + steps);
+  }
+  Serial.printf("%s burst started: %u turn(s) at %u RPM. Target %ld. Remaining after burst: %u.\n",
+                runCcw ? "Counter clockwise" : "Clockwise", turns, config.activeRpm, motor1.targetPosition(), remainingTurnsToday() > turns ? remainingTurnsToday() - turns : 0);
+}
+
+long directionalCenterPosition() {
+  long current = motor1.currentPosition();
+  long relative = current;
+  if (relative % config.stepsPerRotation == 0) {
+    return current;
+  }
+
+  long centerIndex = relative / config.stepsPerRotation;
+
+  if (relative < 0) {
+    centerIndex--;
+  }
+
+  long lowerCenter = centerIndex * config.stepsPerRotation;
+  long upperCenter = lowerCenter + config.stepsPerRotation;
+
+  if (motorPhase == MOTOR_CCW) {
+    return lowerCenter;
+  }
+  if (motorPhase == MOTOR_CW) {
+    return upperCenter;
+  }
+
+  long distanceToLower = labs(current - lowerCenter);
+  long distanceToUpper = labs(upperCenter - current);
+  return distanceToLower <= distanceToUpper ? lowerCenter : upperCenter;
+}
+
+long nearestCenterPosition() {
+  long current = motor1.currentPosition();
+  if (current % config.stepsPerRotation == 0) {
+    return current;
+  }
+
+  long centerIndex = current / config.stepsPerRotation;
+  if (current < 0) {
+    centerIndex--;
+  }
+
+  long lowerCenter = centerIndex * config.stepsPerRotation;
+  long upperCenter = lowerCenter + config.stepsPerRotation;
+  long distanceToLower = labs(current - lowerCenter);
+  long distanceToUpper = labs(upperCenter - current);
+  return distanceToLower <= distanceToUpper ? lowerCenter : upperCenter;
+}
+
+void moveToNearestCenter(const char *reason) {
+  long centerTarget = nearestCenterPosition();
+  motorPhase = MOTOR_IDLE;
+  activeBurstTurns = 0;
+  motor1.setCurrentPosition(motor1.currentPosition());
+  activeBurstStartPosition = motor1.currentPosition();
+  motor1.enableOutputs();
+  applyMotorMotion(rpmToStepsPerSecond(CENTER_RETURN_RPM));
+  motor1.moveTo(centerTarget);
+  Serial.printf("%s. Returning to nearest center target %ld from %ld at %u RPM.\n", reason, centerTarget, motor1.currentPosition(), CENTER_RETURN_RPM);
+}
+
+void stopWinderNow(const char *reason) {
+  autoDailySuppressedByManualStop = true;
+  currentOperationManual = false;
+  singleTurnTestMode = false;
+  setTouchType(NONE, "web action consumed touch");
+  setOperationState(OPERATION_STOP, reason);
+  moveToNearestCenter(reason);
+}
+
+void requestRestart(const char *reason, unsigned long delayMs) {
+  if (restartPending) {
+    return;
+  }
+
+  restartPending = true;
+  restartAt = millis() + delayMs;
+  firmwareUpdateInProgress = true;
+  autoDailySuppressedByManualStop = true;
+  currentOperationManual = false;
+  singleTurnTestMode = false;
+  motorPhase = MOTOR_IDLE;
+  activeBurstTurns = 0;
+  activeBurstStartPosition = motor1.currentPosition();
+  restUntil = 0;
+  motor1.moveTo(motor1.currentPosition());
+  motor1.disableOutputs();
+  Serial.printf("Restart queued in %lu ms: %s\n", delayMs, reason);
+}
+
+bool centerAndStopForMaintenance(const char *reason) {
+  currentOperationManual = false;
+  singleTurnTestMode = false;
+  setTouchType(NONE, "maintenance consumed touch");
+  restUntil = 0;
+
+  long centerTarget = nearestCenterPosition();
+  motorPhase = MOTOR_IDLE;
+  activeBurstTurns = 0;
+  motor1.setCurrentPosition(motor1.currentPosition());
+  activeBurstStartPosition = motor1.currentPosition();
+  motor1.enableOutputs();
+  applyMotorMotion(rpmToStepsPerSecond(CENTER_RETURN_RPM));
+  motor1.moveTo(centerTarget);
+  setOperationState(OPERATION_STOP, reason);
+  Serial.printf("%s. Returning to center target %ld before maintenance at %u RPM.\n", reason, centerTarget, CENTER_RETURN_RPM);
+
+  unsigned long startedAt = millis();
+  while (motor1.distanceToGo() != 0 && millis() - startedAt < 15000UL) {
+    motor1.run();
+    delay(1);
+    yield();
+  }
+
+  bool centered = motor1.distanceToGo() == 0;
+  if (motor1.distanceToGo() == 0) {
+    motor1.setCurrentPosition(0);
+    setOperationState(STANDBY, "centered for maintenance");
+    Serial.println("Winder centered for maintenance.");
+  } else {
+    motor1.moveTo(motor1.currentPosition());
+    Serial.println("Timed out while centering for maintenance; motor stopped at current position.");
+  }
+
+  motor1.disableOutputs();
+  motorPhase = MOTOR_IDLE;
+  activeBurstTurns = 0;
+  activeBurstStartPosition = motor1.currentPosition();
+  Serial.println("Winder stopped for maintenance.");
+  return centered;
+}
+
+void centerAndStopForFirmwareUpdate(const char *reason) {
+  firmwareUpdateInProgress = true;
+  autoDailySuppressedByManualStop = true;
+  bool centered = centerAndStopForMaintenance(reason);
+  Serial.println(centered ? "Winder centered for firmware update." : "Winder was not centered for firmware update.");
+}
+
+void resetDailyCounter() {
+  dailyTurnDate = currentDateKey();
+  completedTurnsToday = 0;
+  autoDailySuppressedByManualStop = false;
+  persistDailyTurnCounter();
+  Serial.printf("Daily turn counter reset for %d.\n", dailyTurnDate);
+}
+
+float rpmToStepsPerSecond(uint16_t rpm) {
+  return (rpm * config.stepsPerRotation) / 60.0;
+}
+
+void applyMotorMotion(float maxStepsPerSecond) {
+  motor1.setMaxSpeed(maxStepsPerSecond);
+  motor1.setAcceleration(400);
+}
+
+const char *directionName() {
+  if (config.direction == DIRECTION_CCW) {
+    return "Counter clockwise";
+  }
+  if (config.direction == DIRECTION_BOTH) {
+    return "Both";
+  }
+  return "Clockwise";
+}
+
+const char *phaseName() {
+  switch (motorPhase) {
+    case MOTOR_IDLE:
+      return "idle";
+    case MOTOR_CW:
+      return "clockwise";
+    case MOTOR_CCW:
+      return "counter clockwise";
+    case MOTOR_REST:
+      return "resting";
+  }
+  return "unknown";
+}
+
+String actionButton(const String &command, const String &label) {
+  String html = F("<form method=\"post\" action=\"/action\"><input type=\"hidden\" name=\"command\" value=\"");
+  html += htmlEscape(command);
+  html += F("\"><button type=\"submit\">");
+  html += htmlEscape(label);
+  html += F("</button></form>");
+  return html;
+}
+
+String statusTile(const String &label, const String &value) {
+  String html = F("<div class=\"metric\"><span>");
+  html += htmlEscape(label);
+  html += F("</span><strong>");
+  html += htmlEscape(value);
+  html += F("</strong></div>");
+  return html;
+}
+
+String burstProgressText() {
+  if (activeBurstTurns == 0 || (motorPhase != MOTOR_CW && motorPhase != MOTOR_CCW)) {
+    return "-";
+  }
+
+  long movedSteps = labs(motor1.currentPosition() - activeBurstStartPosition);
+  uint16_t currentTurn = min<uint16_t>(activeBurstTurns, (movedSteps / config.stepsPerRotation) + 1);
+  if (motor1.distanceToGo() == 0) {
+    currentTurn = activeBurstTurns;
+  }
+  return String(currentTurn) + " of " + String(activeBurstTurns);
+}
+
+String statusText() {
+  String text = F("State: ");
+  text += operationStateName(opState);
+  text += F(", phase: ");
+  text += phaseName();
+  text += F(". Completed today: ");
+  text += String(completedTurnsToday);
+  text += F(" / ");
+  text += String(config.turnsPerDay);
+  text += F(" turns. Automatic daily winding: ");
+  text += config.autoDailyWinding ? "on" : "off";
+  if (autoDailySuppressedByManualStop) {
+    text += F(", paused by manual stop");
+  }
+  text += F(".");
+  return text;
+}
+
+String nextActionText() {
+  if (opState == OPERATION && motorPhase == MOTOR_REST) {
+    unsigned long now = millis();
+    unsigned long remainingMs = restUntil > now ? restUntil - now : 0;
+    return "Next action: next burst in about " + String((remainingMs + 59999UL) / 60000UL) + " minute(s).";
+  }
+  if (opState == OPERATION && (motorPhase == MOTOR_CW || motorPhase == MOTOR_CCW)) {
+    return "Next action: finish current burst and return to rest.";
+  }
+  if (opState == OPERATION_STOP) {
+    return "Next action: return to center and stop.";
+  }
+  if (remainingTurnsToday() == 0) {
+    return "Next action: daily TPD target is complete.";
+  }
+  if (config.autoDailyWinding && autoDailySuppressedByManualStop) {
+    return "Next action: automatic daily winding is paused by manual stop until tomorrow or until today's turns are reset.";
+  }
+  if (config.autoDailyWinding) {
+    return "Next action: automatic daily winding can run when idle.";
+  }
+  return "Next action: waiting for manual start.";
+}
+
+String profileName(uint8_t index) {
+  preferences.begin("watchwinder", true);
+  char key[12];
+  snprintf(key, sizeof(key), "p%dName", index);
+  String name = preferences.getString(key, "Profile " + String(index + 1));
+  preferences.end();
+  return name;
+}
+
+void saveProfile(uint8_t index) {
+  preferences.begin("watchwinder", false);
+  char key[12];
+  snprintf(key, sizeof(key), "p%dDir", index);
+  preferences.putUChar(key, config.direction);
+  snprintf(key, sizeof(key), "p%dTpd", index);
+  preferences.putUShort(key, config.turnsPerDay);
+  snprintf(key, sizeof(key), "p%dRpm", index);
+  preferences.putUShort(key, config.activeRpm);
+  snprintf(key, sizeof(key), "p%dBurst", index);
+  preferences.putUShort(key, config.turnsPerBurst);
+  snprintf(key, sizeof(key), "p%dRest", index);
+  preferences.putUShort(key, config.restMinutes);
+  snprintf(key, sizeof(key), "p%dSteps", index);
+  preferences.putUShort(key, config.stepsPerRotation);
+  preferences.end();
+}
+
+void loadProfile(uint8_t index) {
+  preferences.begin("watchwinder", true);
+  char key[12];
+  snprintf(key, sizeof(key), "p%dDir", index);
+  config.direction = (RotationDirection)preferences.getUChar(key, config.direction);
+  if (config.direction > DIRECTION_BOTH) {
+    config.direction = DIRECTION_CW;
+  }
+  snprintf(key, sizeof(key), "p%dTpd", index);
+  config.turnsPerDay = preferences.getUShort(key, config.turnsPerDay);
+  snprintf(key, sizeof(key), "p%dRpm", index);
+  config.activeRpm = preferences.getUShort(key, config.activeRpm);
+  snprintf(key, sizeof(key), "p%dBurst", index);
+  config.turnsPerBurst = preferences.getUShort(key, config.turnsPerBurst);
+  snprintf(key, sizeof(key), "p%dRest", index);
+  config.restMinutes = preferences.getUShort(key, config.restMinutes);
+  snprintf(key, sizeof(key), "p%dSteps", index);
+  config.stepsPerRotation = preferences.getUShort(key, config.stepsPerRotation);
+  preferences.end();
+}
+
+const char *operationStateName(OperationState state) {
+  switch (state) {
+    case STANDBY:
+      return "STANDBY";
+    case CALIBRATION_ENTRY:
+      return "CALIBRATION_ENTRY";
+    case CALIBRATION:
+      return "CALIBRATION";
+    case CALIBRATION_STOP:
+      return "CALIBRATION_STOP";
+    case OPERATION_START:
+      return "OPERATION_START";
+    case OPERATION:
+      return "OPERATION";
+    case OPERATION_STOP:
+      return "OPERATION_STOP";
+  }
+  return "UNKNOWN";
+}
+
+const char *touchStateName(TouchState state) {
+  switch (state) {
+    case TOUCH_STANDBY:
+      return "TOUCH_STANDBY";
+    case TOUCH_START:
+      return "TOUCH_START";
+    case TOUCH:
+      return "TOUCH";
+    case TOUCH_STOP:
+      return "TOUCH_STOP";
+  }
+  return "UNKNOWN";
+}
+
+const char *touchTypeName(TouchType type) {
+  switch (type) {
+    case NONE:
+      return "NONE";
+    case SIMPLE:
+      return "SIMPLE";
+    case LONG:
+      return "LONG";
+  }
+  return "UNKNOWN";
+}
+
+void setOperationState(OperationState nextState, const char *reason) {
+  if (opState == nextState) {
+    return;
+  }
+  Serial.printf("Operation: %s -> %s (%s)\n", operationStateName(opState), operationStateName(nextState), reason);
+  opState = nextState;
+}
+
+void setTouchState(TouchState nextState) {
+  if (touchState == nextState) {
+    return;
+  }
+  Serial.printf("Touch state: %s -> %s\n", touchStateName(touchState), touchStateName(nextState));
+  touchState = nextState;
+}
+
+void setTouchType(TouchType nextType, const char *reason) {
+  if (touchType == nextType) {
+    return;
+  }
+  Serial.printf("Touch type: %s -> %s (%s)\n", touchTypeName(touchType), touchTypeName(nextType), reason);
+  touchType = nextType;
+}
+
+void logButtonEdge(bool isPressed) {
+  Serial.printf("GPIO%d debounced %s at %lu ms\n", BUTTON_PIN, isPressed ? "HIGH" : "LOW", millis());
+}
+
+void logStartupHeartbeat() {
+  unsigned long now = millis();
+  if (now > startupLogUntil || now - lastStartupLog < STARTUP_LOG_INTERVAL_MS) {
+    return;
+  }
+  lastStartupLog = now;
+  Serial.printf("Startup check: firmware alive at %lu ms, state=%s, touch=%s\n", now, operationStateName(opState), touchTypeName(touchType));
+}
