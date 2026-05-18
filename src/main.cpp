@@ -25,7 +25,7 @@
 #define DEFERRED_RESTART_DELAY_MS 2500
 #define CENTER_RETURN_RPM 20
 #define MDNS_HOSTNAME "chrono-winder"
-#define FIRMWARE_VERSION "v1.5"
+#define FIRMWARE_VERSION "v1.6"
 #define RELEASE_MANIFEST_URL "https://github.com/Lerxtwood/ChronoWinder/releases/latest/download/manifest.json"
 
 void processTouch();
@@ -1388,7 +1388,7 @@ String pageStart(const String &title) {
   page += F("html{min-height:100%;background:#000}");
   page += F("body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;min-height:100%;color:#f5f5f7;background:linear-gradient(180deg,#161617 0%,#050505 55%,#000 100%)}");
   page += F("*{box-sizing:border-box}.page{position:relative;max-width:760px;margin:0 auto;padding:30px 18px 48px}h1,h2,.eyebrow{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;letter-spacing:0;color:#f5f5f7;text-transform:uppercase}h1{position:relative;flex:0 0 100%;order:3;margin:0;padding-top:22px;font-size:28px;line-height:1.08;font-weight:850}h1:before{content:\"\";position:absolute;left:0;right:0;top:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.18),transparent)}h2{margin:0 0 16px;font-size:20px;line-height:1.12;font-weight:850}.eyebrow{display:inline-block;order:1;margin:0;padding:6px 12px;border:1px solid rgba(255,255,255,.16);border-radius:999px;background:rgba(255,255,255,.08);box-shadow:0 8px 24px rgba(0,0,0,.24);font-size:32px;line-height:1;font-weight:900;text-decoration:none;backdrop-filter:blur(18px)}.eyebrow:hover,.eyebrow:focus{border-color:#2997ff;background:rgba(0,113,227,.18);outline:none}");
-  page += F(".top{display:flex;flex-wrap:wrap;justify-content:space-between;gap:18px;align-items:flex-start;margin:8px 0 22px}.top>div{display:contents}nav{display:flex;order:2;gap:8px;flex-wrap:wrap;padding:5px;background:rgba(36,36,38,.72);border:1px solid rgba(255,255,255,.12);border-radius:999px;box-shadow:0 12px 32px rgba(0,0,0,.34);backdrop-filter:blur(18px)}nav a{padding:8px 13px;border-radius:999px;color:#d2d2d7;text-decoration:none;font-size:14px;font-weight:700}nav a.active,nav a:hover{color:#fff;background:#0071e3}");
+  page += F(".top{display:flex;flex-wrap:wrap;justify-content:space-between;gap:18px;align-items:flex-start;margin:8px 0 22px}.top>div{display:contents}nav{display:flex;order:2;gap:8px;flex-wrap:wrap;padding:5px;background:rgba(36,36,38,.72);border:1px solid rgba(255,255,255,.12);border-radius:999px;box-shadow:0 12px 32px rgba(0,0,0,.34);backdrop-filter:blur(18px)}nav a{position:relative;padding:8px 13px;border-radius:999px;color:#d2d2d7;text-decoration:none;font-size:14px;font-weight:700}nav a.active,nav a:hover{color:#fff;background:#0071e3}.updateDot{display:inline-block;width:8px;height:8px;margin-left:7px;border-radius:50%;background:#30d158;box-shadow:0 0 0 3px rgba(48,209,88,.18),0 0 14px rgba(48,209,88,.7);vertical-align:1px}.updateText{margin-left:6px;color:#30d158;font-size:11px;font-weight:900}");
   page += F(".panel,.status{background:rgba(28,28,30,.78);border:1px solid rgba(255,255,255,.12);border-radius:8px;box-shadow:0 18px 42px rgba(0,0,0,.42);backdrop-filter:blur(20px)}.panel{padding:22px;margin-top:18px}.status{padding:13px 15px;color:#a1a1a6}p{line-height:1.48}label{display:block;margin-top:15px;color:#f5f5f7;font-weight:700;font-size:14px}");
   page += F(".metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{padding:15px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.metric span{display:block;color:#a1a1a6;font-size:12px;font-weight:800;text-transform:uppercase}.metric strong{display:block;margin-top:6px;color:#f5f5f7;font-size:22px;letter-spacing:0}.next{margin-bottom:0}");
   page += F("input,select{width:100%;padding:12px 13px;margin-top:7px;font-size:16px;color:#f5f5f7;background:rgba(44,44,46,.9);border:1px solid rgba(255,255,255,.16);border-radius:8px;outline:none}input:focus,select:focus{border-color:#2997ff;box-shadow:0 0 0 4px rgba(41,151,255,.18)}input[type=checkbox]{width:auto;margin-right:9px;accent-color:#0071e3}");
@@ -1403,7 +1403,7 @@ String pageStart(const String &title) {
 }
 
 String pageEnd() {
-  return F("</main></body></html>");
+  return F("<script>document.addEventListener('DOMContentLoaded',()=>{const fw=document.querySelector('nav a[href=\"/update\"]');if(!fw)return;fetch('/remote-update-check').then(r=>r.ok?r.json():null).then(j=>{if(!j||!j.updateAvailable)return;const dot=document.createElement('span');dot.className='updateDot';dot.title='Firmware update available';fw.appendChild(dot);if(fw.classList.contains('active')){const text=document.createElement('span');text.className='updateText';text.textContent=j.remoteVersion;fw.appendChild(text);}}).catch(()=>{});});</script></main></body></html>");
 }
 
 String htmlEscape(const String &value) {
