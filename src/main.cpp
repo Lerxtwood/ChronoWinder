@@ -25,7 +25,7 @@
 #define DEFERRED_RESTART_DELAY_MS 2500
 #define CENTER_RETURN_RPM 20
 #define MDNS_HOSTNAME "chrono-winder"
-#define FIRMWARE_VERSION "v1.13"
+#define FIRMWARE_VERSION "v1.14"
 #define RELEASE_MANIFEST_URL "https://github.com/Lerxtwood/ChronoWinder/releases/latest/download/manifest.json"
 
 void processTouch();
