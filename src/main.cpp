@@ -1403,7 +1403,7 @@ String pageStart(const String &title) {
 }
 
 String pageEnd() {
-  return F("<script>document.addEventListener('DOMContentLoaded',()=>{const fw=document.querySelector('nav a[href=\"/update\"]');if(!fw)return;fetch('/remote-update-check').then(r=>r.ok?r.json():null).then(j=>{if(!j||!j.updateAvailable)return;const dot=document.createElement('span');dot.className='updateDot';dot.title='Firmware update available';fw.appendChild(dot);if(fw.classList.contains('active')){const text=document.createElement('span');text.className='updateText';text.textContent=j.remoteVersion;fw.appendChild(text);}}).catch(()=>{});});</script></main></body></html>");
+  return F("<script>document.addEventListener('DOMContentLoaded',()=>{const fw=document.querySelector('nav a[href=\"/update\"]'),key='chronoFirmwareUpdate';if(!fw)return;function render(j){if(!j||!j.updateAvailable||fw.querySelector('.updateDot'))return;const dot=document.createElement('span');dot.className='updateDot';dot.title='Firmware update available';fw.appendChild(dot);const text=document.createElement('span');text.className='updateText';text.textContent=j.remoteVersion;fw.appendChild(text);}try{const cached=JSON.parse(localStorage.getItem(key)||'null');if(cached&&Date.now()-cached.checkedAt<600000){render(cached);return;}}catch(e){}fetch('/remote-update-check').then(r=>r.ok?r.json():null).then(j=>{if(j){j.checkedAt=Date.now();localStorage.setItem(key,JSON.stringify(j));render(j);}}).catch(()=>{});});</script></main></body></html>");
 }
 
 String htmlEscape(const String &value) {
