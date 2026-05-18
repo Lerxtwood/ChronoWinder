@@ -34,6 +34,8 @@ void processAutoDailyWinding();
 void loadConfig();
 void saveConfig();
 void parseConfigFromRequest();
+void applyAutomaticTpdSettings();
+void calculateAutomaticTpdSettings(uint16_t turnsPerDay, uint16_t &activeRpm, uint16_t &turnsPerBurst, uint16_t &restMinutes);
 void setupWiFi();
 void setupTime();
 void setupWebServer();
@@ -166,6 +168,7 @@ struct AppConfig {
   bool disableMotorDuringRest = true;
   bool manualRunUsesDailyLimit = true;
   bool autoDailyWinding = false;
+  bool automaticBasedOnTpd = false;
 };
 
 struct WatchProfile {
@@ -451,6 +454,10 @@ void loadConfig() {
   config.disableMotorDuringRest = preferences.getBool("idleOff", true);
   config.manualRunUsesDailyLimit = preferences.getBool("manualTpd", true);
   config.autoDailyWinding = preferences.getBool("autoDaily", preferences.getBool("sch0En", false));
+  config.automaticBasedOnTpd = preferences.getBool("autoTpd", false);
+  if (config.automaticBasedOnTpd) {
+    applyAutomaticTpdSettings();
+  }
   dailyTurnDate = preferences.getInt("turnDate", 0);
   completedTurnsToday = preferences.getUShort("turnsDone", 0);
   autoDailySuppressedByManualStop = preferences.getBool("autoSupp", false);
@@ -473,6 +480,7 @@ void saveConfig() {
   preferences.putBool("idleOff", config.disableMotorDuringRest);
   preferences.putBool("manualTpd", config.manualRunUsesDailyLimit);
   preferences.putBool("autoDaily", config.autoDailyWinding);
+  preferences.putBool("autoTpd", config.automaticBasedOnTpd);
   preferences.putUChar("selProfile", selectedProfileSlot);
   preferences.end();
 }
@@ -489,14 +497,51 @@ void parseConfigFromRequest() {
     config.direction = DIRECTION_CW;
   }
   config.turnsPerDay = constrain(server.arg("tpd").toInt(), 1, 2000);
-  config.activeRpm = constrain(server.arg("rpm").toInt(), 4, 10);
-  config.turnsPerBurst = constrain(server.arg("burst").toInt(), 1, 100);
-  config.restMinutes = constrain(server.arg("restMin").toInt(), 0, 240);
+  config.automaticBasedOnTpd = server.hasArg("autoTpd");
+  if (config.automaticBasedOnTpd) {
+    applyAutomaticTpdSettings();
+  } else {
+    config.activeRpm = constrain(server.arg("rpm").toInt(), 4, 10);
+    config.turnsPerBurst = constrain(server.arg("burst").toInt(), 1, 100);
+    config.restMinutes = constrain(server.arg("restMin").toInt(), 0, 240);
+  }
   config.stepsPerRotation = constrain(server.arg("stepsRot").toInt(), 3900, 4300);
   config.calibrationSpeed = constrain(server.arg("calSpd").toInt(), 60, 180);
   config.disableMotorDuringRest = server.hasArg("idleOff");
   config.manualRunUsesDailyLimit = server.hasArg("manualTpd");
   config.autoDailyWinding = server.hasArg("autoDaily");
+}
+
+void applyAutomaticTpdSettings() {
+  calculateAutomaticTpdSettings(config.turnsPerDay, config.activeRpm, config.turnsPerBurst, config.restMinutes);
+}
+
+void calculateAutomaticTpdSettings(uint16_t turnsPerDay, uint16_t &activeRpm, uint16_t &turnsPerBurst, uint16_t &restMinutes) {
+  uint32_t bestError = UINT32_MAX;
+  uint8_t bestRpm = 4;
+  uint8_t bestBurst = 3;
+  uint16_t bestRest = 1;
+
+  for (uint8_t rpm = 4; rpm <= 10; rpm++) {
+    for (uint8_t burst = 3; burst <= 6; burst++) {
+      float idealRest = ((1440.0f * burst) / turnsPerDay) - ((float)burst / rpm);
+      uint16_t rest = constrain((int)lroundf(idealRest), 1, 240);
+      float cycleMinutes = ((float)burst / rpm) + rest;
+      uint16_t calculatedTurns = lroundf((1440.0f * burst) / cycleMinutes);
+      uint32_t error = abs((int32_t)calculatedTurns - (int32_t)turnsPerDay);
+
+      if (error < bestError || (error == bestError && rpm < bestRpm) || (error == bestError && rpm == bestRpm && burst < bestBurst)) {
+        bestError = error;
+        bestRpm = rpm;
+        bestBurst = burst;
+        bestRest = rest;
+      }
+    }
+  }
+
+  activeRpm = bestRpm;
+  turnsPerBurst = bestBurst;
+  restMinutes = bestRest;
 }
 
 void setupWiFi() {
@@ -603,34 +648,7 @@ void handleRoot() {
   page += F("<label>Wi-Fi password<input name=\"password\" type=\"password\" value=\"");
   page += htmlEscape(config.wifiPassword);
   page += F("\"></label>");
-  page += F("</section><section class=\"panel\"><h2>Winding</h2>");
-  page += F("<a class=\"resourceLink\" href=\"https://watch-winder.store/watch-winding-table/\" target=\"_blank\" rel=\"noopener\">Watch winding table</a>");
-  page += F("<label>Rotation direction<select name=\"direction\">");
-  page += F("<option value=\"cw\"");
-  if (config.direction == DIRECTION_CW) {
-    page += F(" selected");
-  }
-  page += F(">Clockwise</option><option value=\"ccw\"");
-  if (config.direction == DIRECTION_CCW) {
-    page += F(" selected");
-  }
-  page += F(">Counter clockwise</option><option value=\"both\"");
-  if (config.direction == DIRECTION_BOTH) {
-    page += F(" selected");
-  }
-  page += F(">Both</option></select></label>");
-  page += F("<label>Turns per day (TPD)<input name=\"tpd\" type=\"number\" min=\"1\" max=\"2000\" value=\"");
-  page += String(config.turnsPerDay);
-  page += F("\"></label>");
-  page += F("<label>Active RPM (Typically 4 RPM - 10 RPM)<input name=\"rpm\" type=\"number\" min=\"4\" max=\"10\" value=\"");
-  page += String(config.activeRpm);
-  page += F("\"></label>");
-  page += F("<label>Turns per burst (Typically 3 - 6)<input name=\"burst\" type=\"number\" min=\"1\" max=\"100\" value=\"");
-  page += String(config.turnsPerBurst);
-  page += F("\"></label>");
-  page += F("<label>Rest minutes between bursts (Typically 4 - 8)<input name=\"restMin\" type=\"number\" min=\"0\" max=\"240\" value=\"");
-  page += String(config.restMinutes);
-  page += F("\"></label>");
+  page += F("</section><section class=\"panel\"><h2>Winder settings</h2>");
   page += F("<label>Steps per full rotation (increase if each turn stops short)<input name=\"stepsRot\" type=\"number\" min=\"3900\" max=\"4300\" value=\"");
   page += String(config.stepsPerRotation);
   page += F("\"></label>");
@@ -663,11 +681,57 @@ void handleRoot() {
     page += F(" checked");
   }
   page += F(">Automatic daily winding</label>");
+  page += F("</section><section class=\"panel\"><h2>Winding</h2>");
+  page += F("<a class=\"resourceLink\" href=\"https://watch-winder.store/watch-winding-table/\" target=\"_blank\" rel=\"noopener\">Watch winding table</a>");
+  page += F("<label>Rotation direction<select name=\"direction\">");
+  page += F("<option value=\"cw\"");
+  if (config.direction == DIRECTION_CW) {
+    page += F(" selected");
+  }
+  page += F(">Clockwise</option><option value=\"ccw\"");
+  if (config.direction == DIRECTION_CCW) {
+    page += F(" selected");
+  }
+  page += F(">Counter clockwise</option><option value=\"both\"");
+  if (config.direction == DIRECTION_BOTH) {
+    page += F(" selected");
+  }
+  page += F(">Both</option></select></label>");
+  page += F("<label>Turns per day (TPD)<input id=\"tpd\" name=\"tpd\" type=\"number\" min=\"1\" max=\"2000\" value=\"");
+  page += String(config.turnsPerDay);
+  page += F("\"></label>");
+  page += F("<label class=\"check\"><input id=\"autoTpd\" type=\"checkbox\" name=\"autoTpd\"");
+  if (config.automaticBasedOnTpd) {
+    page += F(" checked");
+  }
+  page += F(">Automatic based on TPD</label>");
+  page += F("<label>Active RPM (Typically 4 RPM - 10 RPM)<input id=\"rpm\" name=\"rpm\" type=\"number\" min=\"4\" max=\"10\" value=\"");
+  page += String(config.activeRpm);
+  page += F("\"");
+  if (config.automaticBasedOnTpd) {
+    page += F(" disabled");
+  }
+  page += F("></label>");
+  page += F("<label>Turns per burst (Typically 3 - 6)<input id=\"burst\" name=\"burst\" type=\"number\" min=\"1\" max=\"100\" value=\"");
+  page += String(config.turnsPerBurst);
+  page += F("\"");
+  if (config.automaticBasedOnTpd) {
+    page += F(" disabled");
+  }
+  page += F("></label>");
+  page += F("<label>Rest minutes between bursts (Typically 4 - 8)<input id=\"restMin\" name=\"restMin\" type=\"number\" min=\"0\" max=\"240\" value=\"");
+  page += String(config.restMinutes);
+  page += F("\"");
+  if (config.automaticBasedOnTpd) {
+    page += F(" disabled");
+  }
+  page += F("></label>");
   page += F("<p class=\"status\">Completed today: ");
   page += String(completedTurnsToday);
   page += F(" / ");
   page += String(config.turnsPerDay);
   page += F(" turns.</p>");
+  page += F("<script>const autoTpd=document.getElementById('autoTpd'),tpd=document.getElementById('tpd'),rpm=document.getElementById('rpm'),burst=document.getElementById('burst'),restMin=document.getElementById('restMin');let autoTpdTimer=0;function calcAuto(t){let best={err:1e9,rpm:4,burst:3,rest:1};for(let r=4;r<=10;r++){for(let b=3;b<=6;b++){let ideal=(1440*b/t)-(b/r),rest=Math.min(240,Math.max(1,Math.round(ideal))),turns=Math.round(1440*b/(b/r+rest)),err=Math.abs(turns-t);if(err<best.err||(err===best.err&&r<best.rpm)||(err===best.err&&r===best.rpm&&b<best.burst))best={err:err,rpm:r,burst:b,rest:rest};}}return best;}function syncAutoTpd(){const on=autoTpd.checked,t=Math.min(2000,Math.max(1,parseInt(tpd.value||'1',10)));if(on){const v=calcAuto(t);rpm.value=v.rpm;burst.value=v.burst;restMin.value=v.rest;}rpm.disabled=on;burst.disabled=on;restMin.disabled=on;}function queueAutoTpd(){clearTimeout(autoTpdTimer);autoTpdTimer=setTimeout(syncAutoTpd,500);}autoTpd.addEventListener('change',syncAutoTpd);tpd.addEventListener('input',queueAutoTpd);tpd.addEventListener('change',syncAutoTpd);syncAutoTpd();</script>");
   page += F("</section><section class=\"panel\"><h2>Watch Profiles</h2>");
   page += F("<label>Profile<select id=\"profileSlot\" name=\"profileSlot\">");
   for (int i = 0; i < WATCH_PROFILES; i++) {
@@ -1416,6 +1480,9 @@ void loadProfile(uint8_t index) {
   snprintf(key, sizeof(key), "p%dSteps", index);
   config.stepsPerRotation = preferences.getUShort(key, config.stepsPerRotation);
   preferences.end();
+  if (config.automaticBasedOnTpd) {
+    applyAutomaticTpdSettings();
+  }
 }
 
 const char *operationStateName(OperationState state) {
