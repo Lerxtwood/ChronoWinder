@@ -25,7 +25,7 @@
 #define DEFERRED_RESTART_DELAY_MS 2500
 #define CENTER_RETURN_RPM 20
 #define MDNS_HOSTNAME "chrono-winder"
-#define FIRMWARE_VERSION "v1.8"
+#define FIRMWARE_VERSION "v1.9"
 #define RELEASE_MANIFEST_URL "https://github.com/Lerxtwood/ChronoWinder/releases/latest/download/manifest.json"
 
 void processTouch();
@@ -55,6 +55,7 @@ void handleUpdatePage();
 void handlePrepareUpdate();
 void handleRemoteUpdateCheck();
 void handleRemoteUpdateInstall();
+void handleRemoteUpdateAuto();
 void handleUpdateFinished();
 void handleFirmwareUpload();
 bool fetchRemoteUpdateManifest(String &manifest, String &error);
@@ -181,6 +182,7 @@ struct AppConfig {
   bool manualRunUsesDailyLimit = true;
   bool autoDailyWinding = false;
   bool automaticBasedOnTpd = false;
+  bool autoInstallFirmwareUpdates = false;
 };
 
 struct WatchProfile {
@@ -467,6 +469,7 @@ void loadConfig() {
   config.manualRunUsesDailyLimit = preferences.getBool("manualTpd", true);
   config.autoDailyWinding = preferences.getBool("autoDaily", preferences.getBool("sch0En", false));
   config.automaticBasedOnTpd = preferences.getBool("autoTpd", false);
+  config.autoInstallFirmwareUpdates = preferences.getBool("fwAuto", false);
   if (config.automaticBasedOnTpd) {
     applyAutomaticTpdSettings();
   }
@@ -493,6 +496,7 @@ void saveConfig() {
   preferences.putBool("manualTpd", config.manualRunUsesDailyLimit);
   preferences.putBool("autoDaily", config.autoDailyWinding);
   preferences.putBool("autoTpd", config.automaticBasedOnTpd);
+  preferences.putBool("fwAuto", config.autoInstallFirmwareUpdates);
   preferences.putUChar("selProfile", selectedProfileSlot);
   preferences.end();
 }
@@ -616,6 +620,7 @@ void setupWebServer() {
   server.on("/prepare-update", HTTP_POST, handlePrepareUpdate);
   server.on("/remote-update-check", HTTP_GET, handleRemoteUpdateCheck);
   server.on("/remote-update-install", HTTP_POST, handleRemoteUpdateInstall);
+  server.on("/remote-update-auto", HTTP_POST, handleRemoteUpdateAuto);
   server.on("/update", HTTP_POST, handleUpdateFinished, handleFirmwareUpload);
   server.begin();
   Serial.println("Configuration web server started.");
@@ -938,20 +943,25 @@ void handleUpdatePage() {
   page += FIRMWARE_VERSION;
   page += F("</code><span>Manifest</span><code>");
   page += RELEASE_MANIFEST_URL;
-  page += F("</code></div><div class=\"actions\"><button id=\"remoteCheck\" type=\"button\">Check GitHub</button><button id=\"remoteInstall\" type=\"button\" disabled>Install GitHub update</button></div><p id=\"remoteStage\" class=\"stage\">Waiting</p><p id=\"remoteMessage\" class=\"message\">Check GitHub Releases for a newer firmware package.</p></section>");
+  page += F("</code></div><label class=\"check\"><input id=\"autoInstallFw\" type=\"checkbox\"");
+  if (config.autoInstallFirmwareUpdates) {
+    page += F(" checked");
+  }
+  page += F(">Auto-install firmware updates</label><div class=\"actions\"><button id=\"remoteCheck\" type=\"button\">Check GitHub</button><button id=\"remoteInstall\" type=\"button\" disabled>Install GitHub update</button></div><div class=\"panelRule\"></div><div class=\"progressBox\"><progress id=\"remoteProgress\" max=\"100\" value=\"0\"></progress><div id=\"remotePercent\" class=\"percent\">0%</div><p id=\"remoteStage\" class=\"stage\">Waiting</p><p id=\"remoteMessage\" class=\"message\">Check GitHub Releases for a newer firmware package.</p></div></section>");
   page += F("<section class=\"panel\"><h2>Manual Update</h2><div class=\"hint\"><span>Expected file</span><code>.pio/build/esp32-c3-devkitm-1/firmware.bin</code></div>");
   page += F("<form id=\"updateForm\" method=\"post\" action=\"/update\" enctype=\"multipart/form-data\">");
   page += F("<label class=\"uploadBox\"><span>Choose firmware .bin</span><small id=\"fileName\">No file selected</small><input type=\"file\" name=\"firmware\" accept=\".bin\"></label>");
-  page += F("<button id=\"uploadButton\" class=\"primary\" type=\"submit\" disabled>Upload firmware</button></form>");
+  page += F("<button id=\"uploadButton\" class=\"primary\" type=\"submit\" disabled>Upload firmware</button></form><div class=\"panelRule\"></div>");
   page += F("<div class=\"progressBox\"><progress id=\"progress\" max=\"100\" value=\"0\"></progress><div id=\"percent\" class=\"percent\">0%</div><p id=\"stage\" class=\"stage\">Waiting</p><p id=\"message\" class=\"message\">Waiting for firmware file.</p></div></section>");
   page += F("<script>");
   page += F("const minSize=");
   page += String(MIN_FIRMWARE_SIZE_BYTES);
-  page += F(",form=document.getElementById('updateForm'),bar=document.getElementById('progress'),pct=document.getElementById('percent'),stage=document.getElementById('stage'),msg=document.getElementById('message'),fileName=document.getElementById('fileName'),btn=document.getElementById('uploadButton'),remoteCheck=document.getElementById('remoteCheck'),remoteInstall=document.getElementById('remoteInstall'),remoteStage=document.getElementById('remoteStage'),remoteMessage=document.getElementById('remoteMessage');");
+  page += F(",form=document.getElementById('updateForm'),bar=document.getElementById('progress'),pct=document.getElementById('percent'),stage=document.getElementById('stage'),msg=document.getElementById('message'),fileName=document.getElementById('fileName'),btn=document.getElementById('uploadButton'),remoteCheck=document.getElementById('remoteCheck'),remoteInstall=document.getElementById('remoteInstall'),autoInstallFw=document.getElementById('autoInstallFw'),remoteBar=document.getElementById('remoteProgress'),remotePct=document.getElementById('remotePercent'),remoteStage=document.getElementById('remoteStage'),remoteMessage=document.getElementById('remoteMessage');");
   page += F("function setStage(s,m){stage.textContent=s;msg.textContent=m;}");
-  page += F("function setRemote(s,m){remoteStage.textContent=s;remoteMessage.textContent=m;}");
-  page += F("remoteCheck.addEventListener('click',()=>{remoteCheck.disabled=true;remoteInstall.disabled=true;setRemote('Checking','Reading the latest GitHub Release manifest...');fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(({ok,j})=>{if(!ok)throw new Error(j.error||'Check failed');remoteInstall.disabled=!j.updateAvailable;setRemote(j.updateAvailable?'Update available':'Up to date',j.message);}).catch(e=>setRemote('Check failed',e.message)).finally(()=>remoteCheck.disabled=false);});");
-  page += F("remoteInstall.addEventListener('click',()=>{remoteCheck.disabled=true;remoteInstall.disabled=true;setRemote('Installing','Centering winder and downloading firmware from GitHub...');fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(({ok,t})=>{if(ok){document.open();document.write(t);document.close();}else{throw new Error(t||'Install failed');}}).catch(e=>{remoteCheck.disabled=false;setRemote('Install failed',e.message);});});");
+  page += F("let remoteTimer=0;function setRemoteProgress(p){remoteBar.value=p;remotePct.textContent=p+'%';}function setRemote(s,m,p){remoteStage.textContent=s;remoteMessage.textContent=m;if(p!==undefined)setRemoteProgress(p);}function setRemoteButtons(){remoteCheck.disabled=autoInstallFw.checked;remoteInstall.disabled=autoInstallFw.checked||remoteInstall.dataset.ready!=='1';}function startRemoteProgress(){clearInterval(remoteTimer);let p=remoteBar.value||0;remoteTimer=setInterval(()=>{p=Math.min(90,p+3);setRemoteProgress(p);},900);}function stopRemoteProgress(p){clearInterval(remoteTimer);setRemoteProgress(p);}function saveAutoInstall(){fetch('/remote-update-auto',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'enabled='+(autoInstallFw.checked?'1':'0')}).catch(()=>{});setRemoteButtons();}");
+  page += F("function checkRemote(autoRun){remoteCheck.disabled=true;remoteInstall.disabled=true;setRemote('Checking','Reading the latest GitHub Release manifest...',15);return fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(({ok,j})=>{if(!ok)throw new Error(j.error||'Check failed');remoteInstall.dataset.ready=j.updateAvailable?'1':'0';setRemoteButtons();setRemote(j.updateAvailable?'Update available':'Up to date',j.message,j.updateAvailable?35:100);if(autoRun&&j.updateAvailable)return installRemote();}).catch(e=>setRemote('Check failed',e.message,0)).finally(()=>{if(!autoInstallFw.checked)remoteCheck.disabled=false;});}");
+  page += F("function installRemote(){remoteCheck.disabled=true;remoteInstall.disabled=true;setRemote('Installing','Centering winder and downloading firmware from GitHub...',40);startRemoteProgress();return fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(({ok,t})=>{if(ok){stopRemoteProgress(100);document.open();document.write(t);document.close();}else{throw new Error(t||'Install failed');}}).catch(e=>{stopRemoteProgress(0);setRemoteButtons();setRemote('Install failed',e.message,0);});}");
+  page += F("autoInstallFw.addEventListener('change',saveAutoInstall);remoteCheck.addEventListener('click',()=>checkRemote(false));remoteInstall.addEventListener('click',installRemote);setRemoteButtons();if(autoInstallFw.checked)checkRemote(true);");
   page += F("form.firmware.addEventListener('change',()=>{const f=form.firmware.files[0];fileName.textContent=f?f.name:'No file selected';bar.value=0;pct.textContent='0%';if(!f){btn.disabled=true;setStage('Waiting','Waiting for firmware file.');return;}const extOk=f.name.toLowerCase().endsWith('.bin'),sizeOk=f.size>=minSize;btn.disabled=!(extOk&&sizeOk);setStage(extOk&&sizeOk?'Ready':'File check failed',extOk&&sizeOk?'Ready to upload.':'Selected file must be a .bin and at least '+minSize+' bytes.');});");
   page += F("form.addEventListener('submit',e=>{e.preventDefault();const file=form.firmware.files[0];if(!file||btn.disabled){setStage('File check failed','Choose a valid firmware .bin file first.');return;}btn.disabled=true;");
   page += F("setStage('Centering watch','Returning to position 0 before upload...');fetch('/prepare-update',{method:'POST'}).then(r=>{if(!r.ok)throw new Error('prepare failed');return r.text();}).then(()=>{setStage('Uploading firmware','Sending firmware to the ESP32...');");
@@ -1044,6 +1054,14 @@ void handleRemoteUpdateInstall() {
   autoDailySuppressedByManualStop = false;
   persistDailyTurnCounter();
   requestRestart("remote firmware update complete");
+}
+
+void handleRemoteUpdateAuto() {
+  config.autoInstallFirmwareUpdates = server.arg("enabled") == "1" || server.arg("enabled") == "true";
+  preferences.begin("watchwinder", false);
+  preferences.putBool("fwAuto", config.autoInstallFirmwareUpdates);
+  preferences.end();
+  server.send(200, "application/json", config.autoInstallFirmwareUpdates ? "{\"enabled\":true}" : "{\"enabled\":false}");
 }
 
 void handleUpdateFinished() {
@@ -1397,7 +1415,7 @@ String pageStart(const String &title) {
   page += F(".resourceLink{display:block;margin-top:12px;padding:12px 13px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px;color:#2997ff;text-decoration:none;font-weight:800}.resourceLink:hover{background:rgba(0,113,227,.16);border-color:#2997ff}");
   page += F(".window{padding:12px;margin-top:12px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.window label{font-weight:600}.inline{display:flex;gap:12px}.inline label{flex:1}.check{display:flex;align-items:center}.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}.actions form,.profile{margin:0}.actions button,.profile button{width:100%;margin-top:0}");
   page += F(".profile{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:end;margin-top:12px;padding:10px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.profile label{margin-top:0}code{color:#2997ff}.percent{font-weight:800;margin-top:8px;color:#2997ff}progress{width:100%;height:24px;margin-top:18px;accent-color:#0071e3}");
-  page += F(".hint{display:grid;gap:5px;padding:13px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.hint span,.uploadBox small{color:#a1a1a6;font-size:12px;font-weight:800;text-transform:uppercase}.uploadBox{position:relative;display:block;padding:28px 20px;margin-top:14px;text-align:center;background:rgba(44,44,46,.82);border:1px dashed rgba(255,255,255,.24);border-radius:8px;cursor:pointer}.uploadBox:hover,.uploadBox:focus-within{border-color:#2997ff;background:rgba(0,113,227,.12)}.uploadBox span{display:block;color:#f5f5f7;font-size:18px;font-weight:800}.uploadBox input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}.progressBox{margin-top:16px}.stage{margin:10px 0 0;color:#f5f5f7;font-size:18px;font-weight:850}.message{margin:4px 0 0;color:#a1a1a6}.checklist{display:grid;gap:8px}.checklist div{padding:11px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px;color:#f5f5f7}.badge{display:inline-block;margin-right:8px;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.ok{background:rgba(48,209,88,.16);color:#30d158;border:1px solid rgba(48,209,88,.42)}.badge.notok{background:rgba(255,69,58,.16);color:#ff453a;border:1px solid rgba(255,69,58,.42)}.badge.pending{background:rgba(142,142,147,.18);color:#d2d2d7;border:1px solid rgba(142,142,147,.36)}button:disabled{opacity:.45;cursor:not-allowed}");
+  page += F(".hint{display:grid;gap:5px;padding:13px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px}.hint span,.uploadBox small{color:#a1a1a6;font-size:12px;font-weight:800;text-transform:uppercase}.uploadBox{position:relative;display:block;padding:28px 20px;margin-top:14px;text-align:center;background:rgba(44,44,46,.82);border:1px dashed rgba(255,255,255,.24);border-radius:8px;cursor:pointer}.uploadBox:hover,.uploadBox:focus-within{border-color:#2997ff;background:rgba(0,113,227,.12)}.uploadBox span{display:block;color:#f5f5f7;font-size:18px;font-weight:800}.uploadBox input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer}.panelRule{height:1px;margin:18px 0 0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.16),transparent)}.progressBox{margin-top:16px}.stage{margin:10px 0 0;color:#f5f5f7;font-size:18px;font-weight:850}.message{margin:4px 0 0;color:#a1a1a6}.checklist{display:grid;gap:8px}.checklist div{padding:11px;background:rgba(44,44,46,.82);border:1px solid rgba(255,255,255,.10);border-radius:8px;color:#f5f5f7}.badge{display:inline-block;margin-right:8px;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:900}.badge.ok{background:rgba(48,209,88,.16);color:#30d158;border:1px solid rgba(48,209,88,.42)}.badge.notok{background:rgba(255,69,58,.16);color:#ff453a;border:1px solid rgba(255,69,58,.42)}.badge.pending{background:rgba(142,142,147,.18);color:#d2d2d7;border:1px solid rgba(142,142,147,.36)}button:disabled{opacity:.45;cursor:not-allowed}");
   page += F("@media(max-width:620px){.page{padding:22px 14px 36px}h1{font-size:25px}.eyebrow{font-size:28px}nav{justify-content:center}.metrics,.actions{grid-template-columns:1fr}.panel{padding:18px}}");
   page += F("</style></head><body><main class=\"page\">");
   return page;
