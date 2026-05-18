@@ -25,7 +25,7 @@
 #define DEFERRED_RESTART_DELAY_MS 2500
 #define CENTER_RETURN_RPM 20
 #define MDNS_HOSTNAME "chrono-winder"
-#define FIRMWARE_VERSION "v1.11"
+#define FIRMWARE_VERSION "v1.12"
 #define RELEASE_MANIFEST_URL "https://github.com/Lerxtwood/ChronoWinder/releases/latest/download/manifest.json"
 
 void processTouch();
@@ -260,6 +260,7 @@ void setup(void) {
   setupMdns();
   startupLogUntil = millis() + STARTUP_LOG_WINDOW_MS;
   autoFirmwareUpdateAt = millis() + 60000UL;
+  Serial.printf("Auto firmware updates: %s. First boot check in 60 seconds.\n", config.autoInstallFirmwareUpdates ? "enabled" : "disabled");
 }
 
 void loop(void) {
@@ -458,14 +459,20 @@ void processAutoFirmwareUpdate() {
     return;
   }
 
-  autoFirmwareUpdateChecked = true;
   String error;
   Serial.println("Auto firmware update check started.");
   if (!checkAndInstallRemoteFirmware("scheduled auto firmware update", error)) {
     Serial.printf("Auto firmware update skipped: %s\n", error.c_str());
+    if (error == "No newer firmware is available.") {
+      autoFirmwareUpdateChecked = true;
+    } else {
+      autoFirmwareUpdateAt = millis() + 60000UL;
+      Serial.println("Auto firmware update will retry in 60 seconds.");
+    }
     return;
   }
 
+  autoFirmwareUpdateChecked = true;
   Serial.printf("Auto firmware update installed %s. Restart queued.\n", remoteFirmwareUpdatedVersion.c_str());
   autoDailySuppressedByManualStop = false;
   persistDailyTurnCounter();
@@ -1096,6 +1103,7 @@ bool checkAndInstallRemoteFirmware(const char *reason, String &error) {
 
   centerAndStopForFirmwareUpdate(reason);
   if (!installRemoteFirmware(firmwareUrl, sha256, size, error)) {
+    firmwareUpdateInProgress = false;
     return false;
   }
 
