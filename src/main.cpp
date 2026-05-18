@@ -25,7 +25,7 @@
 #define DEFERRED_RESTART_DELAY_MS 2500
 #define CENTER_RETURN_RPM 20
 #define MDNS_HOSTNAME "chrono-winder"
-#define FIRMWARE_VERSION "v1.7"
+#define FIRMWARE_VERSION "v1.8"
 #define RELEASE_MANIFEST_URL "https://github.com/Lerxtwood/ChronoWinder/releases/latest/download/manifest.json"
 
 void processTouch();
@@ -1326,8 +1326,9 @@ bool installRemoteFirmware(const String &firmwareUrl, const String &expectedSha2
       continue;
     }
 
-    size_t toRead = min(available, sizeof(buffer));
-    toRead = min(toRead, (size_t)(expectedSize - written));
+    size_t toRead = available < sizeof(buffer) ? available : sizeof(buffer);
+    size_t remainingBytes = expectedSize - written;
+    toRead = toRead < remainingBytes ? toRead : remainingBytes;
     int bytesRead = stream->readBytes(buffer, toRead);
     if (bytesRead <= 0) {
       continue;
@@ -1473,7 +1474,8 @@ void recordCompletedTurns(uint16_t turns) {
     return;
   }
 
-  completedTurnsToday = min<uint16_t>(config.turnsPerDay, completedTurnsToday + turns);
+  uint32_t updatedTurns = (uint32_t)completedTurnsToday + turns;
+  completedTurnsToday = updatedTurns > config.turnsPerDay ? config.turnsPerDay : updatedTurns;
 
   motor1.setCurrentPosition(0);
   Serial.printf("Completed burst of %u turn(s). Daily progress: %u/%u.\n", turns, completedTurnsToday, config.turnsPerDay);
@@ -1498,7 +1500,8 @@ uint16_t turnsForNextBurst() {
   if (!shouldUseDailyTurnLimit()) {
     return config.turnsPerBurst;
   }
-  return min<uint16_t>(config.turnsPerBurst, remainingTurnsToday());
+  uint16_t remainingTurns = remainingTurnsToday();
+  return config.turnsPerBurst < remainingTurns ? config.turnsPerBurst : remainingTurns;
 }
 
 bool shouldUseDailyTurnLimit() {
@@ -1741,7 +1744,8 @@ String burstProgressText() {
   }
 
   long movedSteps = labs(motor1.currentPosition() - activeBurstStartPosition);
-  uint16_t currentTurn = min<uint16_t>(activeBurstTurns, (movedSteps / config.stepsPerRotation) + 1);
+  uint32_t movedTurns = (movedSteps / config.stepsPerRotation) + 1;
+  uint16_t currentTurn = movedTurns > activeBurstTurns ? activeBurstTurns : movedTurns;
   if (motor1.distanceToGo() == 0) {
     currentTurn = activeBurstTurns;
   }
