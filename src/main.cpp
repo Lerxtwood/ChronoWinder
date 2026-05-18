@@ -3,9 +3,12 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <ESPmDNS.h>
 #include <time.h>
+#include <mbedtls/sha256.h>
 
 #define BUTTON_PIN 3
 #define LONGPRESS_MS 1000
@@ -22,6 +25,8 @@
 #define DEFERRED_RESTART_DELAY_MS 2500
 #define CENTER_RETURN_RPM 20
 #define MDNS_HOSTNAME "chrono-winder"
+#define FIRMWARE_VERSION "v1.5"
+#define RELEASE_MANIFEST_URL "https://github.com/Lerxtwood/ChronoWinder/releases/latest/download/manifest.json"
 
 void processTouch();
 void processOperating();
@@ -48,8 +53,15 @@ void handleProfile();
 void handleRestart();
 void handleUpdatePage();
 void handlePrepareUpdate();
+void handleRemoteUpdateCheck();
+void handleRemoteUpdateInstall();
 void handleUpdateFinished();
 void handleFirmwareUpload();
+bool fetchRemoteUpdateManifest(String &manifest, String &error);
+bool parseRemoteUpdateManifest(const String &manifest, String &version, String &firmwareUrl, String &sha256, uint32_t &size, String &error);
+bool isRemoteVersionNewer(const String &remoteVersion);
+bool installRemoteFirmware(const String &firmwareUrl, const String &expectedSha256, uint32_t expectedSize, String &error);
+String jsonEscape(const String &value);
 String pageStart(const String &title);
 String pageEnd();
 String htmlEscape(const String &value);
@@ -602,6 +614,8 @@ void setupWebServer() {
   server.on("/restart", HTTP_POST, handleRestart);
   server.on("/update", HTTP_GET, handleUpdatePage);
   server.on("/prepare-update", HTTP_POST, handlePrepareUpdate);
+  server.on("/remote-update-check", HTTP_GET, handleRemoteUpdateCheck);
+  server.on("/remote-update-install", HTTP_POST, handleRemoteUpdateInstall);
   server.on("/update", HTTP_POST, handleUpdateFinished, handleFirmwareUpload);
   server.begin();
   Serial.println("Configuration web server started.");
@@ -917,26 +931,32 @@ void handleRestart() {
 
 void handleUpdatePage() {
   String page;
-  page.reserve(2600);
+  page.reserve(5600);
   page += pageStart("Firmware Update");
   page += F("<header class=\"top\"><div><a class=\"eyebrow\" href=\"/\">ChronoWinder</a><h1>Firmware</h1></div><nav><a href=\"/\">Settings</a><a href=\"/status\">Status</a><a class=\"active\" href=\"/update\">Firmware</a></nav></header>");
-  page += F("<section class=\"panel\"><h2>Upload Firmware</h2><div class=\"hint\"><span>Expected file</span><code>.pio/build/esp32-c3-devkitm-1/firmware.bin</code></div>");
+  page += F("<section class=\"panel\"><h2>GitHub update</h2><div class=\"hint\"><span>Current version</span><code>");
+  page += FIRMWARE_VERSION;
+  page += F("</code><span>Manifest</span><code>");
+  page += RELEASE_MANIFEST_URL;
+  page += F("</code></div><div class=\"actions\"><button id=\"remoteCheck\" type=\"button\">Check GitHub</button><button id=\"remoteInstall\" type=\"button\" disabled>Install GitHub update</button></div><p id=\"remoteStage\" class=\"stage\">Waiting</p><p id=\"remoteMessage\" class=\"message\">Check GitHub Releases for a newer firmware package.</p></section>");
+  page += F("<section class=\"panel\"><h2>Manual Update</h2><div class=\"hint\"><span>Expected file</span><code>.pio/build/esp32-c3-devkitm-1/firmware.bin</code></div>");
   page += F("<form id=\"updateForm\" method=\"post\" action=\"/update\" enctype=\"multipart/form-data\">");
   page += F("<label class=\"uploadBox\"><span>Choose firmware .bin</span><small id=\"fileName\">No file selected</small><input type=\"file\" name=\"firmware\" accept=\".bin\"></label>");
   page += F("<button id=\"uploadButton\" class=\"primary\" type=\"submit\" disabled>Upload firmware</button></form>");
   page += F("<div class=\"progressBox\"><progress id=\"progress\" max=\"100\" value=\"0\"></progress><div id=\"percent\" class=\"percent\">0%</div><p id=\"stage\" class=\"stage\">Waiting</p><p id=\"message\" class=\"message\">Waiting for firmware file.</p></div></section>");
-  page += F("<section class=\"panel\"><h2>Update Checks</h2><div class=\"checklist\"><div><span id=\"extCheck\" class=\"badge pending\">WAIT</span>.bin file extension required</div><div><span id=\"sizeCheck\" class=\"badge pending\">WAIT</span>Minimum firmware size checked</div><div><span id=\"centerCheck\" class=\"badge pending\">WAIT</span>Center watch before upload</div><div><span class=\"badge pending\">UPLOAD</span>ESP32 image validation before restart</div></div></section>");
   page += F("<script>");
   page += F("const minSize=");
   page += String(MIN_FIRMWARE_SIZE_BYTES);
-  page += F(",form=document.getElementById('updateForm'),bar=document.getElementById('progress'),pct=document.getElementById('percent'),stage=document.getElementById('stage'),msg=document.getElementById('message'),fileName=document.getElementById('fileName'),btn=document.getElementById('uploadButton'),extCheck=document.getElementById('extCheck'),sizeCheck=document.getElementById('sizeCheck'),centerCheck=document.getElementById('centerCheck');");
+  page += F(",form=document.getElementById('updateForm'),bar=document.getElementById('progress'),pct=document.getElementById('percent'),stage=document.getElementById('stage'),msg=document.getElementById('message'),fileName=document.getElementById('fileName'),btn=document.getElementById('uploadButton'),remoteCheck=document.getElementById('remoteCheck'),remoteInstall=document.getElementById('remoteInstall'),remoteStage=document.getElementById('remoteStage'),remoteMessage=document.getElementById('remoteMessage');");
   page += F("function setStage(s,m){stage.textContent=s;msg.textContent=m;}");
-  page += F("function setBadge(el,ok,text){el.className='badge '+(ok?'ok':'notok');el.textContent=text;}function setWait(el){el.className='badge pending';el.textContent='WAIT';}");
-  page += F("form.firmware.addEventListener('change',()=>{const f=form.firmware.files[0];fileName.textContent=f?f.name:'No file selected';setWait(centerCheck);bar.value=0;pct.textContent='0%';if(!f){setWait(extCheck);setWait(sizeCheck);btn.disabled=true;setStage('Waiting','Waiting for firmware file.');return;}const extOk=f.name.toLowerCase().endsWith('.bin'),sizeOk=f.size>=minSize;setBadge(extCheck,extOk,extOk?'OK':'NOT OK');setBadge(sizeCheck,sizeOk,sizeOk?'OK':'NOT OK');btn.disabled=!(extOk&&sizeOk);setStage(extOk&&sizeOk?'Ready':'File check failed',extOk&&sizeOk?'Ready to upload.':'Selected file failed local checks.');});");
+  page += F("function setRemote(s,m){remoteStage.textContent=s;remoteMessage.textContent=m;}");
+  page += F("remoteCheck.addEventListener('click',()=>{remoteCheck.disabled=true;remoteInstall.disabled=true;setRemote('Checking','Reading the latest GitHub Release manifest...');fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(({ok,j})=>{if(!ok)throw new Error(j.error||'Check failed');remoteInstall.disabled=!j.updateAvailable;setRemote(j.updateAvailable?'Update available':'Up to date',j.message);}).catch(e=>setRemote('Check failed',e.message)).finally(()=>remoteCheck.disabled=false);});");
+  page += F("remoteInstall.addEventListener('click',()=>{remoteCheck.disabled=true;remoteInstall.disabled=true;setRemote('Installing','Centering winder and downloading firmware from GitHub...');fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(({ok,t})=>{if(ok){document.open();document.write(t);document.close();}else{throw new Error(t||'Install failed');}}).catch(e=>{remoteCheck.disabled=false;setRemote('Install failed',e.message);});});");
+  page += F("form.firmware.addEventListener('change',()=>{const f=form.firmware.files[0];fileName.textContent=f?f.name:'No file selected';bar.value=0;pct.textContent='0%';if(!f){btn.disabled=true;setStage('Waiting','Waiting for firmware file.');return;}const extOk=f.name.toLowerCase().endsWith('.bin'),sizeOk=f.size>=minSize;btn.disabled=!(extOk&&sizeOk);setStage(extOk&&sizeOk?'Ready':'File check failed',extOk&&sizeOk?'Ready to upload.':'Selected file must be a .bin and at least '+minSize+' bytes.');});");
   page += F("form.addEventListener('submit',e=>{e.preventDefault();const file=form.firmware.files[0];if(!file||btn.disabled){setStage('File check failed','Choose a valid firmware .bin file first.');return;}btn.disabled=true;");
-  page += F("setStage('Centering watch','Returning to position 0 before upload...');fetch('/prepare-update',{method:'POST'}).then(r=>{if(!r.ok)throw new Error('prepare failed');return r.text();}).then(()=>{setBadge(centerCheck,true,'OK');setStage('Uploading firmware','Sending firmware to the ESP32...');");
+  page += F("setStage('Centering watch','Returning to position 0 before upload...');fetch('/prepare-update',{method:'POST'}).then(r=>{if(!r.ok)throw new Error('prepare failed');return r.text();}).then(()=>{setStage('Uploading firmware','Sending firmware to the ESP32...');");
   page += F("const xhr=new XMLHttpRequest();xhr.open('POST','/update');xhr.upload.onprogress=ev=>{if(ev.lengthComputable){const p=Math.round(ev.loaded*100/ev.total);bar.value=p;pct.textContent=p+'%';if(p>=100)setStage('Validating firmware','Upload complete. ESP32 is validating the image...');}};");
-  page += F("xhr.onload=()=>{setStage('Restarting','Firmware accepted. Restarting device...');document.open();document.write(xhr.responseText);document.close();};xhr.onerror=()=>{btn.disabled=false;setStage('Upload failed','Upload failed before validation.');};const data=new FormData();data.append('firmware',file,file.name);xhr.send(data);}).catch(()=>{btn.disabled=false;setBadge(centerCheck,false,'NOT OK');setStage('Centering failed','Could not center watch for update.');});});");
+  page += F("xhr.onload=()=>{setStage('Restarting','Firmware accepted. Restarting device...');document.open();document.write(xhr.responseText);document.close();};xhr.onerror=()=>{btn.disabled=false;setStage('Upload failed','Upload failed before validation.');};const data=new FormData();data.append('firmware',file,file.name);xhr.send(data);}).catch(()=>{btn.disabled=false;setStage('Centering failed','Could not center watch for update.');});});");
   page += F("</script>");
   page += pageEnd();
   server.send(200, "text/html", page);
@@ -945,6 +965,85 @@ void handleUpdatePage() {
 void handlePrepareUpdate() {
   centerAndStopForFirmwareUpdate("firmware update requested");
   server.send(200, "text/plain", "ready");
+}
+
+void handleRemoteUpdateCheck() {
+  String manifest;
+  String error;
+  if (!fetchRemoteUpdateManifest(manifest, error)) {
+    server.send(500, "application/json", "{\"error\":\"" + jsonEscape(error) + "\"}");
+    return;
+  }
+
+  String version;
+  String firmwareUrl;
+  String sha256;
+  uint32_t size = 0;
+  if (!parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
+    server.send(500, "application/json", "{\"error\":\"" + jsonEscape(error) + "\"}");
+    return;
+  }
+
+  bool updateAvailable = isRemoteVersionNewer(version);
+  String message = updateAvailable
+                       ? "Version " + version + " is available. Firmware size " + String(size) + " bytes."
+                       : "Current firmware " + String(FIRMWARE_VERSION) + " is up to date.";
+  String response = F("{\"currentVersion\":\"");
+  response += jsonEscape(FIRMWARE_VERSION);
+  response += F("\",\"remoteVersion\":\"");
+  response += jsonEscape(version);
+  response += F("\",\"updateAvailable\":");
+  response += updateAvailable ? F("true") : F("false");
+  response += F(",\"size\":");
+  response += String(size);
+  response += F(",\"message\":\"");
+  response += jsonEscape(message);
+  response += F("\"}");
+  server.send(200, "application/json", response);
+}
+
+void handleRemoteUpdateInstall() {
+  String manifest;
+  String error;
+  if (!fetchRemoteUpdateManifest(manifest, error)) {
+    server.send(500, "text/plain", error);
+    return;
+  }
+
+  String version;
+  String firmwareUrl;
+  String sha256;
+  uint32_t size = 0;
+  if (!parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
+    server.send(500, "text/plain", error);
+    return;
+  }
+
+  if (!isRemoteVersionNewer(version)) {
+    server.send(409, "text/plain", "No newer firmware is available.");
+    return;
+  }
+
+  centerAndStopForFirmwareUpdate("remote firmware update requested");
+  if (!installRemoteFirmware(firmwareUrl, sha256, size, error)) {
+    firmwareUpdateInProgress = false;
+    server.send(500, "text/plain", error);
+    return;
+  }
+
+  String page = pageStart("Firmware updated");
+  page += F("<header class=\"top\"><div><a class=\"eyebrow\" href=\"/\">ChronoWinder</a><h1>Firmware</h1></div><nav><a href=\"/\">Settings</a><a href=\"/status\">Status</a><a class=\"active\" href=\"/update\">Firmware</a></nav></header>");
+  page += F("<section class=\"panel\"><h2>Firmware updated</h2><div class=\"checklist\"><div><span class=\"badge ok\">OK</span>Downloaded ");
+  page += htmlEscape(version);
+  page += F(" from GitHub Releases</div><div><span class=\"badge ok\">OK</span>SHA-256 verification passed</div><div><span class=\"badge ok\">OK</span>Restart queued</div></div><p class=\"status\">The device is restarting. The Settings page will reload automatically in a few seconds.</p></section>");
+  page += F("<script>setTimeout(()=>{location.href='/'},8000);</script>");
+  page += pageEnd();
+  server.sendHeader("Connection", "close");
+  server.sendHeader("Refresh", "8; url=/");
+  server.send(200, "text/html", page);
+  autoDailySuppressedByManualStop = false;
+  persistDailyTurnCounter();
+  requestRestart("remote firmware update complete");
 }
 
 void handleUpdateFinished() {
@@ -1031,6 +1130,254 @@ void handleFirmwareUpload() {
   }
 }
 
+String jsonValueForKey(const String &json, const String &key) {
+  String pattern = "\"" + key + "\"";
+  int keyIndex = json.indexOf(pattern);
+  if (keyIndex < 0) {
+    return "";
+  }
+  int colonIndex = json.indexOf(':', keyIndex + pattern.length());
+  if (colonIndex < 0) {
+    return "";
+  }
+  int valueStart = colonIndex + 1;
+  while (valueStart < (int)json.length() && isspace((unsigned char)json[valueStart])) {
+    valueStart++;
+  }
+  if (valueStart >= (int)json.length()) {
+    return "";
+  }
+
+  if (json[valueStart] == '"') {
+    valueStart++;
+    String value;
+    bool escaped = false;
+    for (int i = valueStart; i < (int)json.length(); i++) {
+      char c = json[i];
+      if (escaped) {
+        value += c;
+        escaped = false;
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        return value;
+      } else {
+        value += c;
+      }
+    }
+    return "";
+  }
+
+  int valueEnd = valueStart;
+  while (valueEnd < (int)json.length() && json[valueEnd] != ',' && json[valueEnd] != '}') {
+    valueEnd++;
+  }
+  String value = json.substring(valueStart, valueEnd);
+  value.trim();
+  return value;
+}
+
+bool fetchRemoteUpdateManifest(String &manifest, String &error) {
+  if (WiFi.status() != WL_CONNECTED) {
+    error = "Wi-Fi is not connected.";
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(15000);
+  if (!http.begin(client, RELEASE_MANIFEST_URL)) {
+    error = "Could not open release manifest URL.";
+    return false;
+  }
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    error = "Manifest request failed with HTTP " + String(code) + ".";
+    http.end();
+    return false;
+  }
+
+  manifest = http.getString();
+  http.end();
+  if (manifest.length() == 0) {
+    error = "Manifest was empty.";
+    return false;
+  }
+  return true;
+}
+
+bool parseRemoteUpdateManifest(const String &manifest, String &version, String &firmwareUrl, String &sha256, uint32_t &size, String &error) {
+  version = jsonValueForKey(manifest, "version");
+  firmwareUrl = jsonValueForKey(manifest, "firmware");
+  sha256 = jsonValueForKey(manifest, "sha256");
+  size = jsonValueForKey(manifest, "size").toInt();
+  sha256.toLowerCase();
+
+  if (version.length() == 0 || firmwareUrl.length() == 0 || sha256.length() != 64 || size < MIN_FIRMWARE_SIZE_BYTES) {
+    error = "Manifest is missing version, firmware URL, SHA-256, or a valid size.";
+    return false;
+  }
+  if (!firmwareUrl.startsWith("https://")) {
+    error = "Firmware URL must use HTTPS.";
+    return false;
+  }
+  return true;
+}
+
+uint16_t versionPart(const String &version, uint8_t partIndex) {
+  uint8_t currentPart = 0;
+  uint16_t value = 0;
+  bool collecting = false;
+
+  for (uint16_t i = 0; i <= version.length(); i++) {
+    char c = i < version.length() ? version[i] : '.';
+    if (isdigit((unsigned char)c)) {
+      if (currentPart == partIndex) {
+        value = (value * 10) + (c - '0');
+        collecting = true;
+      }
+    } else if (c == '.') {
+      if (currentPart == partIndex) {
+        return collecting ? value : 0;
+      }
+      currentPart++;
+      value = 0;
+      collecting = false;
+    }
+  }
+  return value;
+}
+
+bool isRemoteVersionNewer(const String &remoteVersion) {
+  String current = FIRMWARE_VERSION;
+  for (uint8_t part = 0; part < 3; part++) {
+    uint16_t remotePart = versionPart(remoteVersion, part);
+    uint16_t currentPart = versionPart(current, part);
+    if (remotePart > currentPart) {
+      return true;
+    }
+    if (remotePart < currentPart) {
+      return false;
+    }
+  }
+  return false;
+}
+
+bool installRemoteFirmware(const String &firmwareUrl, const String &expectedSha256, uint32_t expectedSize, String &error) {
+  if (WiFi.status() != WL_CONNECTED) {
+    error = "Wi-Fi is not connected.";
+    return false;
+  }
+
+  firmwareUpdateInProgress = true;
+  firmwareUploadRejected = false;
+  firmwareUpdateError = "";
+  motor1.disableOutputs();
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(20000);
+  if (!http.begin(client, firmwareUrl)) {
+    error = "Could not open firmware URL.";
+    return false;
+  }
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    error = "Firmware download failed with HTTP " + String(code) + ".";
+    http.end();
+    return false;
+  }
+
+  if (!Update.begin(expectedSize)) {
+    error = "Could not start firmware update.";
+    Update.printError(Serial);
+    http.end();
+    return false;
+  }
+
+  mbedtls_sha256_context shaContext;
+  mbedtls_sha256_init(&shaContext);
+  mbedtls_sha256_starts_ret(&shaContext, 0);
+
+  WiFiClient *stream = http.getStreamPtr();
+  stream->setTimeout(10000);
+  uint8_t buffer[1024];
+  uint32_t written = 0;
+  unsigned long lastReadAt = millis();
+
+  while (http.connected() && written < expectedSize) {
+    size_t available = stream->available();
+    if (available == 0) {
+      if (millis() - lastReadAt > 20000UL) {
+        error = "Firmware download timed out.";
+        Update.abort();
+        mbedtls_sha256_free(&shaContext);
+        http.end();
+        return false;
+      }
+      delay(1);
+      yield();
+      continue;
+    }
+
+    size_t toRead = min(available, sizeof(buffer));
+    toRead = min(toRead, (size_t)(expectedSize - written));
+    int bytesRead = stream->readBytes(buffer, toRead);
+    if (bytesRead <= 0) {
+      continue;
+    }
+    lastReadAt = millis();
+    mbedtls_sha256_update_ret(&shaContext, buffer, bytesRead);
+    if (Update.write(buffer, bytesRead) != (size_t)bytesRead) {
+      error = "Firmware flash write failed.";
+      Update.abort();
+      mbedtls_sha256_free(&shaContext);
+      http.end();
+      return false;
+    }
+    written += bytesRead;
+  }
+
+  http.end();
+  if (written != expectedSize) {
+    error = "Firmware download size mismatch.";
+    Update.abort();
+    mbedtls_sha256_free(&shaContext);
+    return false;
+  }
+
+  uint8_t digest[32];
+  mbedtls_sha256_finish_ret(&shaContext, digest);
+  mbedtls_sha256_free(&shaContext);
+
+  char actualSha256[65];
+  for (uint8_t i = 0; i < 32; i++) {
+    snprintf(actualSha256 + (i * 2), 3, "%02x", digest[i]);
+  }
+  actualSha256[64] = '\0';
+
+  if (expectedSha256 != String(actualSha256)) {
+    error = "Firmware SHA-256 verification failed.";
+    Update.abort();
+    return false;
+  }
+
+  if (!Update.end(true)) {
+    error = "ESP32 firmware validation failed.";
+    Update.printError(Serial);
+    return false;
+  }
+
+  Serial.printf("Remote firmware update complete: %u bytes, sha256=%s\n", written, actualSha256);
+  return true;
+}
+
 String pageStart(const String &title) {
   String page;
   page.reserve(2600);
@@ -1065,6 +1412,15 @@ String htmlEscape(const String &value) {
   escaped.replace("\"", "&quot;");
   escaped.replace("<", "&lt;");
   escaped.replace(">", "&gt;");
+  return escaped;
+}
+
+String jsonEscape(const String &value) {
+  String escaped = value;
+  escaped.replace("\\", "\\\\");
+  escaped.replace("\"", "\\\"");
+  escaped.replace("\r", "");
+  escaped.replace("\n", "\\n");
   return escaped;
 }
 
